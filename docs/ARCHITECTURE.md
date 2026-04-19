@@ -3,8 +3,8 @@
 ## 主流程
 
 ```text
-Input Files
-  -> parse_inputs        (failed_sources / empty_extracted_sources)
+Input Files (txt/md/pdf/docx/png/jpg/jpeg)
+  -> parse_inputs        (failed_sources w/ reason / empty_extracted_sources / ingestion_summary / notifier)
   -> chunk_notes
   -> classify_notes      (categorized + review_needed)
   -> stage_summarize
@@ -25,8 +25,11 @@ Input Files
 
 - `tools/parse_inputs.py`
   - 输入标准化为文档对象
-  - 失败文件不阻断全流程，进入 `logs.failed_sources`
+  - 支持 txt / md / pdf / docx；图片 `.png/.jpg/.jpeg` 走 opt-in OCR，缺失依赖时降级为 `ocr_backend_unavailable`
+  - 失败文件不阻断全流程，进入 `logs.failed_sources`，条目携带 `reason`
   - 正文为空的文件进入 `logs.empty_extracted_sources`
+  - 可选 `notifier(event, payload)` 回调驱动 CLI 阶段告知
+  - 返回体附 `ingestion_summary`：本次运行的真实能力自报表
 
 - `tools/chunk_notes.py`
   - 文档 → chunks（段落→句→字符三级 fallback）
@@ -56,14 +59,22 @@ Input Files
 
 ```text
 {
-  "overview":            { source_count, chunk_count, failed_sources, empty_extracted_sources },
+  "overview": {
+    source_count, chunk_count,
+    failed_sources,              # each: {source, source_name, source_type, reason, error}
+    empty_extracted_sources,
+    ingestion_summary,           # detected/supported/unsupported/succeeded/
+                                 # empty_extracted/failed/breakdown_by_type/
+                                 # supported_extensions_effective/image_extensions_opt_in/
+                                 # ocr_backend
+  },
   "source_documents":    [ ... ],
   "categorized_notes":   { <category>: [ chunk, ... ] },
   "stage_summaries":     { stage_1, stage_2, stage_3 },
   "key_points":          { key_points: [...], stats: {...} },
   "web_resources":       [],                # placeholder in MVP
   "review_needed":       [ chunk-level items only ],
-  "pipeline_notes":      [ system-level messages ],
+  "pipeline_notes":      [ system-level messages, e.g. "no usable input text", validation warnings ],
   "validation":          { is_valid, warnings, stats },
   "export_paths":        { json_path, md_path }
 }

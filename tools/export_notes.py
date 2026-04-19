@@ -41,6 +41,32 @@ def _render_markdown(result: Dict[str, Any]) -> str:
     if empty_sources:
         lines.append(f"- Empty extracted sources: {len(empty_sources)}")
 
+    # --- Ingestion summary (input-layer self-report) ---
+    ingestion = overview.get("ingestion_summary") or {}
+    if ingestion:
+        lines += [
+            "",
+            "## Ingestion Summary",
+            f"- Detected: {ingestion.get('detected', 0)}",
+            f"- Supported: {ingestion.get('supported', 0)}",
+            f"- Unsupported: {ingestion.get('unsupported', 0)}",
+            f"- Succeeded: {ingestion.get('succeeded', 0)}",
+            f"- Empty extracted: {ingestion.get('empty_extracted', 0)}",
+            f"- Failed: {ingestion.get('failed', 0)}",
+            f"- OCR backend: {ingestion.get('ocr_backend', 'unavailable')}",
+        ]
+        eff = ingestion.get("supported_extensions_effective") or []
+        if eff:
+            lines.append(f"- Effective supported extensions: {', '.join(eff)}")
+        opt_in = ingestion.get("image_extensions_opt_in") or []
+        if opt_in:
+            lines.append(f"- Image extensions (opt-in OCR): {', '.join(opt_in)}")
+        breakdown = ingestion.get("breakdown_by_type") or {}
+        if breakdown:
+            lines.append("- Breakdown by type:")
+            for k, v in breakdown.items():
+                lines.append(f"  - {k}: {v}")
+
     lines += ["", "## Categorized Notes"]
     for cat, items in categorized.items():
         lines.append(f"### {cat}")
@@ -115,7 +141,10 @@ def _render_markdown(result: Dict[str, Any]) -> str:
     if failed_sources:
         lines += ["", "## Failed Sources"]
         for f in failed_sources:
-            lines.append(f"- {f.get('source')}: {f.get('error')}")
+            reason = f.get("reason") or "parse_error"
+            lines.append(
+                f"- {f.get('source')} [{reason}]: {f.get('error', '')}"
+            )
 
     if empty_sources:
         lines += ["", "## Empty Extracted Sources"]

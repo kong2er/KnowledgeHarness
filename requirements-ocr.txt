@@ -1,0 +1,14 @@
+# Optional OCR backend for KnowledgeHarness image inputs (.png / .jpg / .jpeg).
+# Install separately ONLY if you want real image OCR:
+#     pip install -r requirements-ocr.txt
+#
+# You ALSO need the tesseract system binary on PATH. On Debian/Ubuntu:
+#     sudo apt-get install tesseract-ocr
+# Optional Chinese language pack:
+#     sudo apt-get install tesseract-ocr-chi-sim
+#
+# When any of these is missing, image inputs degrade to:
+#     failed_sources[*].reason == "ocr_backend_unavailable"
+# (by design; see docs/ACCEPTANCE.md §4 "parse_inputs / image OCR").
+pytesseract>=0.3.10
+Pillow>=10.0.0
