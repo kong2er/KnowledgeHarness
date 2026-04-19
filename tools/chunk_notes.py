@@ -16,15 +16,30 @@ def _split_long_paragraph(text: str, max_chars: int = 500) -> List[str]:
 
     chunks: List[str] = []
     current = ""
-    for sentence in re.split(r"(?<=[。！？.!?])\s+", text):
+    # Split right after sentence-ending punctuation. Unlike the previous
+    # `\s+` lookbehind, this also handles CJK paragraphs that have no
+    # whitespace between sentences.
+    for sentence in re.split(r"(?<=[。！？.!?])", text):
+        sentence = sentence.strip()
         if not sentence:
             continue
+
+        # Hard upper bound: a single sentence longer than max_chars is
+        # sliced by characters so the downstream never sees oversized chunks.
+        if len(sentence) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            for i in range(0, len(sentence), max_chars):
+                chunks.append(sentence[i : i + max_chars])
+            continue
+
         if len(current) + len(sentence) + 1 <= max_chars:
             current = f"{current} {sentence}".strip()
         else:
             if current:
                 chunks.append(current)
-            current = sentence.strip()
+            current = sentence
     if current:
         chunks.append(current)
     return chunks

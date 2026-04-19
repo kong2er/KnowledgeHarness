@@ -3,6 +3,8 @@
 ## Agent Role
 You are the execution agent for KnowledgeHarness.
 You must convert user-provided materials into structured study notes through a fixed pipeline.
+Authoritative fact source: `docs/PROJECT_STATE.md`.
+Authoritative acceptance source: `docs/ACCEPTANCE.md`.
 
 ## Core Rules
 
@@ -13,6 +15,7 @@ You must convert user-provided materials into structured study notes through a f
 5. Do not fabricate facts.
 6. Do not drop unresolved content silently.
 7. Keep source traceability in outputs.
+8. Chunk-level issues go to `review_needed`; system-level warnings go to `pipeline_notes`. Do not mix them.
 
 ## Required Pipeline Order
 
@@ -21,7 +24,7 @@ You must convert user-provided materials into structured study notes through a f
 3. Classify chunks
 4. Stage summarize
 5. Extract key points
-6. Web enrichment (if implemented and enabled)
+6. Web enrichment (not implemented in MVP; placeholder returns `[]`)
 7. Validate
 8. Export
 
@@ -37,26 +40,41 @@ Allowed categories:
 - `extended_reading`
 - `unclassified`
 
-Low-confidence or ambiguous chunks must be:
-- put into `unclassified`
-- appended to `review_needed` with reason
+Rules:
+- Ties are resolved by `CATEGORY_PRIORITY` inside `tools/classify_notes.py`, not by dumping everything into `unclassified`.
+- Chunks with zero keyword hits, or with `confidence < 0.4`, must be appended to `review_needed` with a reason.
 
 ## Output Constraints
 
-Final output should contain at least:
-- overview
-- categorized notes
-- stage summaries
-- key points
-- web resources
-- review needed
-- validation
+Final output (JSON + Markdown) must contain at least:
+- `overview` (with `source_count`, `chunk_count`, `failed_sources`, `empty_extracted_sources`)
+- `categorized_notes`
+- `stage_summaries` (all three of `stage_1`, `stage_2`, `stage_3` always present)
+- `key_points`
+- `web_resources`
+- `review_needed` (chunk-level only)
+- `pipeline_notes` (system-level messages, e.g. validation warnings)
+- `validation`
 
-For external resources (when enabled), each item must keep:
-- title
-- url
-- purpose
-- relevance reason
+For external resources (only when enrichment is actually implemented), each item must keep:
+- `title`
+- `url`
+- `purpose`
+- `relevance_reason`
+
+## Validation Policy
+
+The validator must flag:
+- `too_many_unclassified_chunks` (>35% of total chunks)
+- `empty_major_categories:<list>`
+- `duplicated_chunks_detected`
+- `missing_stage_summaries:<list>`
+- `failed_sources_present:<count>`
+- `empty_extracted_sources:<count>`
+
+Not implemented in MVP (tracked in `docs/TODO.md`):
+- semantic conflict detection between chunks
+- missing-link check for external resources (only meaningful once enrichment lands)
 
 ## Prohibitions
 
@@ -64,3 +82,4 @@ For external resources (when enabled), each item must keep:
 - Do not replace user-origin content with web content.
 - Do not bypass validation in the documented pipeline.
 - Do not use implicit chat memory as the single source of project truth.
+- Do not push system-level warnings into `review_needed` via a synthetic `chunk_id = "SYSTEM"`.

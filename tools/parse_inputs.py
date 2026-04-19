@@ -60,21 +60,34 @@ def parse_inputs(paths: Iterable[str | Path]) -> Dict[str, Any]:
     Returns:
         {
           "documents": [...],
-          "logs": {"failed_sources": [...]}
+          "logs": {
+            "failed_sources": [...],              # parser raised an exception
+            "empty_extracted_sources": [...],      # parser succeeded but text is empty
+          }
         }
     """
     documents: List[Dict[str, Any]] = []
     failed_sources: List[Dict[str, str]] = []
+    empty_extracted_sources: List[str] = []
 
     for path in paths:
         try:
-            documents.append(parse_single_file(path))
+            doc = parse_single_file(path)
         except Exception as exc:  # keep pipeline resilient
             failed_sources.append({"source": str(path), "error": str(exc)})
+            continue
+
+        if not (doc.get("extracted_text") or "").strip():
+            empty_extracted_sources.append(doc.get("source_name") or str(path))
+
+        documents.append(doc)
 
     return {
         "documents": documents,
-        "logs": {"failed_sources": failed_sources},
+        "logs": {
+            "failed_sources": failed_sources,
+            "empty_extracted_sources": empty_extracted_sources,
+        },
     }
 
 
