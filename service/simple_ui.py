@@ -48,6 +48,21 @@ API_ENV_KEYS = [
     "KNOWLEDGEHARNESS_API_KEY",
 ]
 
+# ---------------------------------------------------------------------------
+# Per-run upload limits
+# ---------------------------------------------------------------------------
+# These are defensive caps. The pipeline itself has no fixed upper bound,
+# but OCR on large image batches is slow and the in-memory multipart
+# parser scales with request size. These numbers are deliberately generous
+# for typical study material but refuse "accidentally run on 200 files".
+
+MAX_IMAGE_COUNT_PER_RUN = 10          # png/jpg/jpeg combined
+MAX_TOTAL_FILES_PER_RUN = 20          # overall cap across all extensions
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024   # 20 MB per single uploaded file
+MAX_REQUEST_BODY_BYTES = 200 * 1024 * 1024  # 200 MB per whole POST body
+
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+
 
 def _parse_multipart(
     body: bytes,
@@ -200,7 +215,82 @@ def _safe_filename(name: str) -> str:
     return base.replace("/", "_").replace("\\", "_")
 
 
-def _store_uploaded_files(items: List[Tuple[str, str, bytes]]) -> List[str]:
+# ---------------------------------------------------------------------------
+# Uploaded file pool
+# ---------------------------------------------------------------------------
+
+UPLOAD_POOL_DIR = Path("uploads") / "ui_uploads"
+
+
+def _list_uploaded_pool() -> List[Tuple[str, int, float]]:
+    """List the upload pool as `(filename, size_bytes, mtime_epoch)`, newest first."""
+    if not UPLOAD_POOL_DIR.exists():
+        return []
+    items: List[Tuple[str, int, float]] = []
+    for p in UPLOAD_POOL_DIR.iterdir():
+        if not p.is_file():
+            continue
+        try:
+            stat = p.stat()
+        except OSError:
+            continue
+        items.append((p.name, int(stat.st_size), float(stat.st_mtime)))
+    items.sort(key=lambda t: t[2], reverse=True)
+    return items
+
+
+def _validate_pool_file(name: str) -> Path | None:
+    """Return the resolved file Path if `name` safely resolves inside the
+    upload pool, else None.
+
+    Accepts any filename characters (including CJK, parentheses) as long as
+    the resulting path, after resolution, stays inside UPLOAD_POOL_DIR.
+    Rejects path separators, null bytes, leading dots, and absolute paths.
+    """
+    if not name or "\x00" in name:
+        return None
+    if "/" in name or "\\" in name or name.startswith("."):
+        return None
+    try:
+        pool = UPLOAD_POOL_DIR.resolve()
+    except OSError:
+        return None
+    try:
+        target = (pool / name).resolve()
+        target.relative_to(pool)
+    except (ValueError, OSError):
+        return None
+    if not target.is_file():
+        return None
+    return target
+
+
+def _clear_upload_pool() -> int:
+    """Delete every file directly in the upload pool. Returns the count removed."""
+    if not UPLOAD_POOL_DIR.exists():
+        return 0
+    removed = 0
+    for p in UPLOAD_POOL_DIR.iterdir():
+        if p.is_file():
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _format_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.2f} MB"
+
+
+def _store_uploaded_files(
+    items: List[Tuple[str, str, bytes]],
+) -> Tuple[List[str], List[str]]:
     """Persist uploaded file parts to `uploads/ui_uploads/` and return paths.
 
     Args:
@@ -209,30 +299,41 @@ def _store_uploaded_files(items: List[Tuple[str, str, bytes]]) -> List[str]:
             are ignored.
 
     Empty payloads are skipped so the user re-submitting the form without
-    picking a new file does not create a zero-byte placeholder.
-    """
-    if not items:
-        return []
-    upload_dir = Path("uploads") / "ui_uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    picking a new file does not create a zero-byte placeholder. Payloads
+    whose size exceeds ``MAX_FILE_SIZE_BYTES`` are also rejected.
 
+    Returns:
+        (saved_paths, rejected_descriptions) where each rejected_description
+        is a short human-readable string ("filename (size): 超过单文件上限").
+    """
     saved: List[str] = []
+    rejected: List[str] = []
+    if not items:
+        return saved, rejected
+    UPLOAD_POOL_DIR.mkdir(parents=True, exist_ok=True)
+
     for field_name, filename, data in items:
         if field_name != "upload_files":
             continue
         if not data:
             continue
+        if len(data) > MAX_FILE_SIZE_BYTES:
+            rejected.append(
+                f"{filename}（{_format_size(len(data))}）: 超过单文件上限 "
+                f"{_format_size(MAX_FILE_SIZE_BYTES)}"
+            )
+            continue
         base = _safe_filename(filename)
-        target = upload_dir / base
+        target = UPLOAD_POOL_DIR / base
         stem = target.stem
         suffix = target.suffix
         idx = 1
         while target.exists():
-            target = upload_dir / f"{stem}_{idx}{suffix}"
+            target = UPLOAD_POOL_DIR / f"{stem}_{idx}{suffix}"
             idx += 1
         target.write_bytes(data)
         saved.append(str(target))
-    return saved
+    return saved, rejected
 
 
 def _checked(v: bool) -> str:
@@ -348,6 +449,8 @@ def _render_page(
     error: str = "",
     result: Dict[str, Any] | None = None,
     uploaded_files: List[str] | None = None,
+    pool_selected: set[str] | None = None,
+    flash: str = "",
 ) -> str:
     output_dir = str(form.get("output_dir", "outputs"))
     topic_mode = str(form.get("topic_mode", "auto"))
@@ -357,6 +460,7 @@ def _render_page(
     kp_max = str(form.get("keypoint_max_points", "12"))
     export_docx = bool(form.get("export_docx", False))
     uploaded_files = uploaded_files or []
+    pool_selected = pool_selected or set()
 
     result_html = ""
     if result is not None:
@@ -401,11 +505,48 @@ def _render_page(
         if error
         else ""
     )
-    uploaded_html = ""
-    if uploaded_files:
-        uploaded_html = '<div class="row"><label>本次已上传文件</label><pre>' + html.escape(
-            "\n".join(uploaded_files)
-        ) + "</pre></div>"
+    flash_html = (
+        f'<div class="ok">{html.escape(flash)}</div>'
+        if flash
+        else ""
+    )
+
+    # --- Pool card ---
+    pool_items = _list_uploaded_pool()
+    pool_rows_html: List[str] = []
+    for name, size, mtime in pool_items:
+        import time as _time
+        date_str = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(mtime))
+        escaped = html.escape(name)
+        checked = "checked" if name in pool_selected else ""
+        pool_rows_html.append(
+            "<li class=\"pool-row\">"
+            "<label class=\"pool-pick\">"
+            f'<input type="checkbox" name="existing_files" value="{escaped}" {checked} form="runForm" />'
+            f'<span class="pool-name">{escaped}</span>'
+            f'<span class="pool-meta">{_format_size(size)} · {date_str}</span>'
+            "</label>"
+            '<form method="post" action="/uploads/remove" class="pool-remove">'
+            f'<input type="hidden" name="name" value="{escaped}" />'
+            '<button type="submit" class="link-btn" title="从文件池移除">删除</button>'
+            "</form>"
+            "</li>"
+        )
+    if pool_items:
+        pool_card_html = f"""
+        <section class="card">
+          <div class="pool-head">
+            <h2 style="margin:0;">已上传文件池</h2>
+            <form method="post" action="/uploads/clear" class="pool-clear">
+              <button type="submit" class="danger-btn">清空全部</button>
+            </form>
+          </div>
+          <p class="hint">勾选后点"运行流水线"即可再次处理，不需要重新上传。</p>
+          <ul class="pool-list">{''.join(pool_rows_html)}</ul>
+        </section>
+        """
+    else:
+        pool_card_html = ""
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -471,6 +612,23 @@ def _render_page(
     .badge-warn {{ background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }}
     table.mini {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
     table.mini th, table.mini td {{ border-bottom: 1px solid #e5e7eb; padding: 4px 6px; text-align: left; }}
+    .ok {{ background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0;
+          padding: 10px; border-radius: 8px; margin-bottom: 12px; }}
+    /* ---- upload pool ---- */
+    .pool-head {{ display: flex; align-items: center; justify-content: space-between; }}
+    .pool-list {{ list-style: none; padding: 0; margin: 8px 0 0 0; }}
+    .pool-row {{
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 8px; border-bottom: 1px solid #f1f5f9;
+    }}
+    .pool-row:last-child {{ border-bottom: 0; }}
+    .pool-pick {{ display: flex; align-items: center; gap: 10px; font-weight: 400; margin: 0; flex: 1 1 auto; cursor: pointer; }}
+    .pool-pick input[type=checkbox] {{ margin: 0; }}
+    .pool-name {{ font-weight: 500; }}
+    .pool-meta {{ color: #6b7280; font-size: 12px; }}
+    .pool-remove {{ margin: 0; }}
+    .link-btn {{ background: transparent; color: #991b1b; border: 0; padding: 2px 6px; font-size: 13px; cursor: pointer; text-decoration: underline; }}
+    .danger-btn {{ background: #b91c1c; color: #fff; border: 0; border-radius: 6px; padding: 6px 10px; font-weight: 600; cursor: pointer; font-size: 13px; }}
   </style>
   <script>
     document.addEventListener("DOMContentLoaded", function () {{
@@ -497,14 +655,18 @@ def _render_page(
   <div class="wrap">
     <section class="card">
       <h1>KnowledgeHarness 简易界面</h1>
-      <p class="hint">请上传文件进行处理。分类模式、阈值等在"高级选项"中设置。</p>
+      <p class="hint">上传文件或从下方"文件池"勾选已上传的文件进行处理。分类模式、阈值等在"高级选项"中设置。</p>
+      {flash_html}
       {error_html}
-      <form method="post" action="/run" enctype="multipart/form-data">
+      <form id="runForm" method="post" action="/run" enctype="multipart/form-data">
         <div class="row">
-          <label for="upload_files">上传文件（可多选；支持 txt/md/pdf/docx 及可选 OCR 图片 png/jpg/jpeg）</label>
+          <label for="upload_files">上传新文件（可多选；支持 txt/md/pdf/docx 及可选 OCR 图片 png/jpg/jpeg）</label>
           <input id="upload_files" type="file" name="upload_files" multiple />
+          <p class="hint">
+            单次最多 <strong>{MAX_TOTAL_FILES_PER_RUN}</strong> 个文件（其中图片最多 <strong>{MAX_IMAGE_COUNT_PER_RUN}</strong> 张，以避免 OCR 耗时过长），单文件不超过 <strong>{_format_size(MAX_FILE_SIZE_BYTES)}</strong>。
+            文件会被保存到 <code>uploads/ui_uploads/</code>，后续运行可直接在下方勾选，不用重传。
+          </p>
         </div>
-        {uploaded_html}
 
         <div class="grid-single">
           <div class="row">
@@ -553,6 +715,7 @@ def _render_page(
         <a class="button-link" href="/settings">API 设置</a>
       </form>
     </section>
+    {pool_card_html}
     {result_html}
   </div>
 </body>
@@ -709,11 +872,21 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _redirect(self, location: str, status: int = 303) -> None:
+        """Post-redirect-get: 303 makes the browser issue a GET on `location`."""
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         route = parsed.path
         if route == "/":
-            self._write_html(_render_page(form={}))
+            # Support optional flash message via ?flash=...
+            flash_params = parse_qs(parsed.query, keep_blank_values=True)
+            flash = (flash_params.get("flash") or [""])[0][:200]
+            self._write_html(_render_page(form={}, flash=flash))
             return
         if route == "/settings":
             self._write_html(_render_settings_page())
@@ -747,23 +920,62 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             return
 
+        if self.path == "/uploads/clear":
+            removed = _clear_upload_pool()
+            # POST-redirect-GET so refresh doesn't re-submit.
+            from urllib.parse import quote
+            self._redirect(f"/?flash={quote(f'已清空文件池，移除 {removed} 个文件')}")
+            return
+
+        if self.path == "/uploads/remove":
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = self.rfile.read(length).decode("utf-8", errors="replace")
+            form_raw = parse_qs(payload, keep_blank_values=True)
+            name = (form_raw.get("name") or [""])[0].strip()
+            from urllib.parse import quote
+            target = _validate_pool_file(name)
+            if target is None:
+                self._redirect(f"/?flash={quote('删除失败：文件名不合法或不存在')}")
+                return
+            try:
+                target.unlink()
+                self._redirect(f"/?flash={quote(f'已删除 {name}')}")
+            except OSError as exc:
+                self._redirect(f"/?flash={quote(f'删除失败：{exc}')}")
+            return
+
         if self.path != "/run":
             self._write_html("<h1>未找到页面</h1>", status=404)
             return
 
+        # Refuse pathologically-large POST bodies before allocating memory.
+        try:
+            total_len = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            total_len = 0
+        if total_len > MAX_REQUEST_BODY_BYTES:
+            self._write_html(
+                f"<h1>上传过大</h1>"
+                f"<p>单次请求体不得超过 {_format_size(MAX_REQUEST_BODY_BYTES)}。</p>",
+                status=413,
+            )
+            return
+
         content_type = self.headers.get("Content-Type", "")
         uploaded_saved: List[str] = []
+        rejected_uploads: List[str] = []
         form: Dict[str, Any]
+        existing_selected: List[str] = []
 
         if "multipart/form-data" in content_type.lower():
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length)
+            body = self.rfile.read(total_len)
             boundary = b""
             m = re.search(r"boundary=([^\s;]+)", content_type, flags=re.I)
             if m:
                 boundary = m.group(1).strip('"').encode("utf-8", "replace")
             fields, file_parts = _parse_multipart(body, boundary)
-            uploaded_saved = _store_uploaded_files(file_parts)
+            uploaded_saved, rejected_uploads = _store_uploaded_files(file_parts)
+            existing_selected = list(fields.get("existing_files", []))
 
             def _first(name: str, default: str = "") -> str:
                 vs = fields.get(name) or []
@@ -779,9 +991,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "keypoint_max_points": _first("keypoint_max_points", "12"),
             }
         else:
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = self.rfile.read(length).decode("utf-8", errors="replace")
+            payload = self.rfile.read(total_len).decode("utf-8", errors="replace")
             form_raw = parse_qs(payload, keep_blank_values=True)
+            existing_selected = list(form_raw.get("existing_files", []))
             form = {
                 "output_dir": (form_raw.get("output_dir") or ["outputs"])[0],
                 "topic_mode": (form_raw.get("topic_mode") or ["auto"])[0],
@@ -792,14 +1004,69 @@ class _Handler(BaseHTTPRequestHandler):
                 "keypoint_max_points": (form_raw.get("keypoint_max_points") or ["12"])[0],
             }
 
+        # Resolve existing pool selections to absolute paths (skip anything
+        # that fails the pool validator -- user may have deleted a file
+        # between render and submit).
+        pool_paths: List[str] = []
+        for sel_name in existing_selected:
+            resolved = _validate_pool_file(sel_name)
+            if resolved is not None:
+                pool_paths.append(str(resolved))
+
+        # De-duplicate by resolved absolute path so a file that is both
+        # newly uploaded and selected from the pool is not processed twice.
+        all_input_paths: List[str] = []
+        seen_abs: set[str] = set()
+        for path in list(uploaded_saved) + pool_paths:
+            abs_key = str(Path(path).resolve())
+            if abs_key in seen_abs:
+                continue
+            seen_abs.add(abs_key)
+            all_input_paths.append(path)
+
+        # Highlight newly-uploaded files + already-selected pool items on
+        # the re-render so user sees what just happened.
+        pool_selected_after = {Path(p).name for p in (list(uploaded_saved) + pool_paths)}
+
         try:
-            files = collect_input_files(list(uploaded_saved))
+            # Surface per-file size rejections in the error banner so the
+            # user understands why a file they picked is missing. We do not
+            # bail here -- we still try to run the pipeline on whatever did
+            # get saved.
+            preamble_notes: List[str] = []
+            if rejected_uploads:
+                preamble_notes.append(
+                    "以下文件超过单文件大小上限 "
+                    f"{_format_size(MAX_FILE_SIZE_BYTES)}，已拒收：\n- "
+                    + "\n- ".join(rejected_uploads)
+                )
+
+            # Enforce per-run count ceilings.
+            image_count = sum(
+                1 for p in all_input_paths if Path(p).suffix.lower() in IMAGE_SUFFIXES
+            )
+            if image_count > MAX_IMAGE_COUNT_PER_RUN:
+                raise ValueError(
+                    f"图片文件过多（{image_count} 张）。"
+                    f"单次最多 {MAX_IMAGE_COUNT_PER_RUN} 张图片（OCR 耗时长）。"
+                    "请在文件池中取消部分勾选后再试。"
+                )
+            if len(all_input_paths) > MAX_TOTAL_FILES_PER_RUN:
+                raise ValueError(
+                    f"文件总数过多（{len(all_input_paths)}）。"
+                    f"单次最多 {MAX_TOTAL_FILES_PER_RUN} 个文件。"
+                    "请取消部分勾选后再试。"
+                )
+
+            files = collect_input_files(all_input_paths)
             if not files:
                 msg = (
-                    "未识别到可处理的上传文件，请检查文件格式（支持 txt/md/pdf/docx 及可选 OCR 图片）。"
-                    if uploaded_saved
-                    else "未上传任何文件，请先选择文件。"
+                    "未识别到可处理的文件，请确认扩展名为 txt/md/pdf/docx 或已安装 OCR 环境的 png/jpg/jpeg。"
+                    if all_input_paths
+                    else "未选择任何文件：请上传新文件，或在下方\"已上传文件池\"中勾选。"
                 )
+                if preamble_notes:
+                    msg = msg + "\n\n" + "\n\n".join(preamble_notes)
                 raise ValueError(msg)
 
             try:
@@ -822,14 +1089,30 @@ class _Handler(BaseHTTPRequestHandler):
                 keypoint_max_points=kp_max,
                 notifier=None,
             )
-            body = _render_page(form=form, result=result, uploaded_files=uploaded_saved)
-            self._write_html(body)
-        except ValueError as exc:
-            # User-facing validation (empty upload, wrong type).
+            # If some uploads were rejected on size, make that visible even
+            # on the success page -- attach a pipeline_note.
+            if preamble_notes:
+                existing_notes = result.get("pipeline_notes") or []
+                result["pipeline_notes"] = existing_notes + [
+                    "UI upload size limit: " + "; ".join(rejected_uploads)
+                ]
             body = _render_page(
                 form=form,
-                error=f"输入错误: {exc}",
+                result=result,
                 uploaded_files=uploaded_saved,
+                pool_selected=pool_selected_after,
+            )
+            self._write_html(body)
+        except ValueError as exc:
+            # User-facing validation (empty upload, wrong type, limits).
+            err_text = str(exc)
+            if rejected_uploads and "超过单文件大小上限" not in err_text:
+                err_text += "\n另有超限文件被拒收：\n- " + "\n- ".join(rejected_uploads)
+            body = _render_page(
+                form=form,
+                error=f"输入错误: {err_text}",
+                uploaded_files=uploaded_saved,
+                pool_selected=pool_selected_after,
             )
             self._write_html(body, status=400)
         except Exception as exc:
@@ -838,6 +1121,7 @@ class _Handler(BaseHTTPRequestHandler):
                 form=form,
                 error=f"流水线异常: {exc}",
                 uploaded_files=uploaded_saved,
+                pool_selected=pool_selected_after,
             )
             self._write_html(body, status=500)
 
