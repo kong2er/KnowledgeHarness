@@ -61,13 +61,16 @@ KnowledgeHarness 是一个面向学习资料整理的工程化流水线工具，
    - 支持 `config/pipeline_config.json`（分块长度、关键词规则、OCR 语言、导出折叠等）
    - 支持 Markdown 折叠导出（`export.markdown_use_details`）
    - 提供 OCR-ready Docker 交付基础（`Dockerfile`）
+12. 最小服务入口（FastAPI）：
+   - 提供 `service/api_server.py`（`/health`、`/pipeline/run`、`/pipeline/capabilities`）
+   - 服务层复用现有 `run_pipeline`，保持同样降级语义
 
 ## 当前未实现或占位（必须知晓）
 
 - **图片 OCR 是 opt-in**：默认环境下图片输入会优雅降级为 `ocr_backend_unavailable`；仅在安装 `requirements-ocr.txt` 并具备 `tesseract` 二进制时才真正 OCR
-- API 服务（Flask / FastAPI）未实现
+- Flask 服务入口未实现（当前仅 FastAPI 最小入口）
 - 主题粗分类的远程 API 仅提供可选接入点，默认不依赖外部服务
-- 自动化测试：已提供多份 stdlib 测试脚本（`tests/test_parse_inputs.py` / `tests/test_stage1_core.py` / `tests/test_topic_coarse_classify.py` / `tests/test_phase2_features.py` / `tests/test_phase3_non_api.py`），尚未建立 pytest 套件
+- 自动化测试：已提供多份 stdlib 测试脚本（`tests/test_parse_inputs.py` / `tests/test_stage1_core.py` / `tests/test_topic_coarse_classify.py` / `tests/test_phase2_features.py` / `tests/test_phase3_non_api.py` / `tests/test_api_service_entry.py`），尚未建立 pytest 套件
 
 ## 运行方式
 
@@ -95,6 +98,7 @@ cp .env.example .env
 默认 API 请求格式模板：
 - `config/api_payload_templates.json`
 - 未配置 API 时，CLI 会提示：`请接入API后使用`
+- 推荐在 `.env` 配置统一 API：`KNOWLEDGEHARNESS_API_URL` / `KNOWLEDGEHARNESS_API_KEY`
 
 4. 执行（单文件 / 目录 / 通配符均可；项目元目录会被自动跳过）：
 
@@ -112,6 +116,10 @@ python3 app.py samples/ --output-dir outputs --topic-taxonomy config/topic_taxon
 python3 app.py samples/ --output-dir outputs --enable-web-enrichment --web-enrichment-mode local
 # 只保留置信度>=0.6 的 key points
 python3 app.py samples/ --output-dir outputs --keypoint-min-confidence 0.6
+# 同时导出 Word（.docx）
+python3 app.py samples/ --output-dir outputs --export-docx
+# 导出完整报告（含阶段与校验信息），默认是“纯笔记版”
+python3 app.py samples/ --output-dir outputs --full-report
 # 静默（不输出 [ingest] 进度）
 python3 app.py samples/ --output-dir outputs --quiet
 ```
@@ -120,6 +128,7 @@ python3 app.py samples/ --output-dir outputs --quiet
 
 - `outputs/result.json`
 - `outputs/result.md`
+- 默认 `result.md` 为“最终整理笔记”；流程诊断信息保留在 `result.json`
 
 6. 运行本模块的最小测试（不依赖 pytest）：
 
@@ -129,9 +138,26 @@ python3 tests/test_stage1_core.py
 python3 tests/test_topic_coarse_classify.py
 python3 tests/test_phase2_features.py
 python3 tests/test_phase3_non_api.py
+python3 tests/test_api_service_entry.py
 ```
 
-7. Docker 运行（OCR-ready）：
+7. 启动 FastAPI 最小服务（可选）：
+
+```bash
+pip install -r requirements-api.txt
+uvicorn service.api_server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+8. 启动最简本地检查 UI（可选，无额外依赖）：
+
+```bash
+python3 service/simple_ui.py --host 127.0.0.1 --port 8765
+# 浏览器打开 http://127.0.0.1:8765
+# 在页面点击“API 设置”可单独配置并保存 API 到 .env
+# 在页面勾选“同时导出 Word（.docx）”可额外生成 result.docx
+```
+
+9. Docker 运行（OCR-ready）：
 
 ```bash
 docker build -t knowledgeharness .

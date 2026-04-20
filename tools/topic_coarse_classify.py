@@ -153,7 +153,10 @@ def _call_topic_api(
     API response should be JSON with shape:
     {"topic_label": "...", "confidence": 0.0-1.0, "reason": "..."}
     """
-    url = os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
+    url = (
+        os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
     if not url:
         raise RuntimeError("TOPIC_CLASSIFIER_API_URL is not configured")
 
@@ -186,7 +189,10 @@ def _call_topic_api(
     }
 
     headers = {"Content-Type": "application/json"}
-    api_key = os.getenv("TOPIC_CLASSIFIER_API_KEY", "").strip()
+    api_key = (
+        os.getenv("TOPIC_CLASSIFIER_API_KEY", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_KEY", "").strip()
+    )
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
@@ -234,7 +240,10 @@ def topic_coarse_classify(
     """
     labels, warnings = _load_taxonomy(taxonomy_path)
     allowed_labels = [x["label_id"] for x in labels]
-    api_url_configured = bool(os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip())
+    api_url_configured = bool(
+        os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
     retries = max(0, int(api_retries))
 
     mode_norm = (mode or "auto").strip().lower()

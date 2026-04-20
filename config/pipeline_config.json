@@ -31,6 +31,8 @@
     "fallback_language": "eng"
   },
   "export": {
-    "markdown_use_details": false
+    "markdown_use_details": false,
+    "export_docx": false,
+    "final_notes_only": true
   }
 }

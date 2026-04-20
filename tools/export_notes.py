@@ -224,10 +224,85 @@ def _render_markdown(result: Dict[str, Any], markdown_use_details: bool = False)
     return "\n".join(lines).strip() + "\n"
 
 
+def _render_final_notes_markdown(result: Dict[str, Any]) -> str:
+    """Render a note-first markdown without pipeline diagnostics."""
+    topic_output = result.get("topic_classification", {}) or {}
+    topic_items = topic_output.get("items", []) or []
+    topic_label = topic_items[0].get("topic_label") if topic_items else "unknown_topic"
+
+    categorized = result.get("categorized_notes", {}) or {}
+    stage3 = (result.get("stage_summaries", {}) or {}).get("stage_3", {}) or {}
+    key_points = (result.get("key_points", {}) or {}).get("key_points", []) or []
+
+    def _cat_text(cat: str) -> List[str]:
+        rows = categorized.get(cat, []) or []
+        out: List[str] = []
+        for r in rows:
+            t = (r.get("chunk_text") or "").strip()
+            if t:
+                out.append(t)
+        return out
+
+    lines: List[str] = [
+        "# 整理笔记",
+        "",
+        "## 主题",
+        f"- {topic_label}",
+        "",
+        "## 核心概念",
+    ]
+    concepts = _cat_text("basic_concepts")
+    if concepts:
+        lines.extend([f"- {x}" for x in concepts])
+    else:
+        lines.append("- （无）")
+
+    lines += ["", "## 方法步骤"]
+    methods = _cat_text("methods_and_processes")
+    if methods:
+        lines.extend([f"- {x}" for x in methods])
+    else:
+        lines.append("- （无）")
+
+    lines += ["", "## 例子与应用"]
+    examples = _cat_text("examples_and_applications")
+    if examples:
+        lines.extend([f"- {x}" for x in examples])
+    else:
+        lines.append("- （无）")
+
+    lines += ["", "## 易错点"]
+    pitfalls = _cat_text("difficult_or_error_prone_points")
+    if pitfalls:
+        lines.extend([f"- {x}" for x in pitfalls])
+    else:
+        lines.append("- （无）")
+
+    lines += ["", "## 延伸阅读"]
+    reading = _cat_text("extended_reading")
+    if reading:
+        lines.extend([f"- {x}" for x in reading])
+    else:
+        next_reading = stage3.get("next_reading_directions", []) or []
+        if next_reading:
+            lines.extend([f"- {x}" for x in next_reading])
+        else:
+            lines.append("- （无）")
+
+    lines += ["", "## 重点速记"]
+    if key_points:
+        lines.extend([f"- {x}" for x in key_points])
+    else:
+        lines.append("- （无）")
+
+    return "\n".join(lines).strip() + "\n"
+
+
 def export_notes(
     result: Dict[str, Any],
     out_dir: str | Path = "outputs",
     markdown_use_details: bool = False,
+    final_notes_only: bool = False,
 ) -> Dict[str, str]:
     """Export result as JSON + Markdown files."""
     out = Path(out_dir)
@@ -237,10 +312,11 @@ def export_notes(
     md_path = out / "result.md"
 
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    md_path.write_text(
-        _render_markdown(result, markdown_use_details=markdown_use_details),
-        encoding="utf-8",
-    )
+    if final_notes_only:
+        md_text = _render_final_notes_markdown(result)
+    else:
+        md_text = _render_markdown(result, markdown_use_details=markdown_use_details)
+    md_path.write_text(md_text, encoding="utf-8")
 
     return {
         "json_path": str(json_path.resolve()),

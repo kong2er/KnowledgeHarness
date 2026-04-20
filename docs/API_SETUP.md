@@ -12,6 +12,8 @@ Last Updated: 2026-04-20
 两者都是可选协助模式。
 未接入 API 时，系统会自动降级，不会中断主流程。
 
+另外，仓库已提供最小 FastAPI 服务入口：`service/api_server.py`。
+
 ## 2. 环境配置
 
 1. 复制模板：
@@ -20,19 +22,21 @@ Last Updated: 2026-04-20
 cp .env.example .env
 ```
 
-2. 填写 `.env`（最小必填项是 URL）：
+2. 填写 `.env`（推荐使用统一 API 配置）：
 
 ```dotenv
-TOPIC_CLASSIFIER_API_URL=https://your-topic-api.example.com/classify
-TOPIC_CLASSIFIER_API_KEY=your_token_if_needed
-WEB_ENRICHMENT_API_URL=https://your-enrich-api.example.com/enrich
-WEB_ENRICHMENT_API_KEY=your_token_if_needed
+KNOWLEDGEHARNESS_API_URL=https://your-shared-api.example.com/infer
+KNOWLEDGEHARNESS_API_KEY=your_token_if_needed
 ```
 
 说明：
 - `app.py` 会自动读取项目根目录 `.env`。
 - 若你在系统环境中已设置同名变量，`.env` 不会覆盖已有值。
 - 当用户选择 `--topic-mode api` 或 `--web-enrichment-mode api` 但 URL 未配置时，CLI 会提示：`请接入API后使用`。
+- 如需按模块覆盖，可额外设置：
+  - `TOPIC_CLASSIFIER_API_URL` / `TOPIC_CLASSIFIER_API_KEY`
+  - `WEB_ENRICHMENT_API_URL` / `WEB_ENRICHMENT_API_KEY`
+  - 覆盖变量留空时自动回退统一配置。
 
 ## 3. 默认请求格式文件
 
@@ -115,3 +119,26 @@ python3 app.py samples/demo.md --enable-web-enrichment --web-enrichment-mode api
 ```
 
 如果没配置 API URL，你会看到：`请接入API后使用`。
+
+## 8. 启动最小服务入口（FastAPI）
+
+```bash
+pip install -r requirements-api.txt
+uvicorn service.api_server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+可用端点：
+- `GET /health`
+- `POST /pipeline/run`
+- `GET /pipeline/capabilities`
+
+最小请求示例：
+
+```json
+{
+  "inputs": ["samples/demo.md"],
+  "output_dir": "outputs",
+  "topic_mode": "auto",
+  "enable_web_enrichment": false
+}
+```

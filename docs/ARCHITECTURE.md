@@ -27,6 +27,11 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - 读取运行时配置（`config/pipeline_config.json`）
   - 汇总统一 `result`，分离 `review_needed` 与 `pipeline_notes`
 
+- `service/api_server.py`
+  - FastAPI 最小服务入口
+  - 暴露 `/health`、`/pipeline/run`、`/pipeline/capabilities`
+  - 服务层只做请求封装，不改动核心流水线语义
+
 - `tools/parse_inputs.py`
   - 输入标准化为文档对象
   - 支持 txt / md / pdf / docx；图片 `.png/.jpg/.jpeg` 走 opt-in OCR，缺失依赖时降级为 `ocr_backend_unavailable`
@@ -128,6 +133,6 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 ## 当前边界
 
 - 外部补充可开关，且失败降级不影响主流程
-- 无服务端 API 层
+- 已有最小 FastAPI 服务入口；Flask 与生产级鉴权/限流/任务队列未实现
 - 无测试框架层
 - 无高级（NLI/向量）语义冲突检测

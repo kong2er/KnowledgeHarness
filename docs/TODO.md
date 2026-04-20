@@ -28,7 +28,8 @@
 
 ## P2
 
-- [ ] 提供 FastAPI / Flask 最小服务入口
+- [x] ~~提供 FastAPI 最小服务入口~~（2026-04-20：`service/api_server.py` + `requirements-api.txt`）
+- [ ] 提供 Flask 最小服务入口（可选；当前已有 FastAPI）
 - [ ] API 接口联调（等待外部 API 规范与鉴权信息就绪后再接入）
 - [x] ~~补齐 API 接入基础资产（`.env.example` + `config/api_payload_templates.json` + `docs/API_SETUP.md`）~~（2026-04-20）
 - [x] ~~增加配置文件（阈值、分块长度、分类关键词、LABEL_HINTS、OCR 语言）~~（2026-04-20：`config/pipeline_config.json` + `tools/runtime_config.py`）

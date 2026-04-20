@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from tools.chunk_notes import chunk_notes
 from tools.classify_notes import classify_notes
 from tools.export_notes import export_notes
+from tools.export_word import export_word_from_markdown
 from tools.extract_keypoints import extract_keypoints
 from tools.parse_inputs import SUPPORTED_EXTENSIONS, parse_inputs
 from tools.detect_semantic_conflicts import detect_semantic_conflicts
@@ -22,7 +23,9 @@ from tools.web_enrichment import web_enrich
 
 # Directories that are part of the project itself; when the user points
 # app.py at a parent directory we skip these to avoid treating project
-# documentation as user study material.
+# documentation as user study material. `uploads/` is where the optional
+# Web UI stores freshly-uploaded files — we skip it so a later `python3
+# app.py .` run does not re-ingest previously-uploaded material.
 EXCLUDED_DIR_NAMES = {
     "outputs",
     "docs",
@@ -31,6 +34,7 @@ EXCLUDED_DIR_NAMES = {
     ".git",
     "__pycache__",
     ".venv",
+    "uploads",
 }
 
 
@@ -64,6 +68,11 @@ def collect_input_files(inputs: List[str]) -> List[str]:
                     if _is_under_excluded_dir(f):
                         continue
                     files.append(str(f))
+        elif p.is_file():
+            # Explicit file arguments are accepted unconditionally, even
+            # when the file happens to live inside an excluded directory
+            # (e.g. the Web UI's `uploads/ui_uploads/` staging area).
+            files.append(str(p))
         else:
             matches = glob.glob(item)
             if matches:
@@ -72,9 +81,6 @@ def collect_input_files(inputs: List[str]) -> List[str]:
                     if _is_under_excluded_dir(mp):
                         continue
                     files.append(m)
-            elif p.exists() and p.is_file():
-                # Explicit file arguments are accepted unconditionally.
-                files.append(str(p))
 
     # Stable unique order.
     deduped: List[str] = []
@@ -159,6 +165,8 @@ def run_pipeline(
     ocr_languages: str = "chi_sim+eng",
     ocr_fallback_language: str = "eng",
     markdown_use_details: bool = False,
+    final_notes_only: bool = True,
+    export_docx: bool = False,
     pre_pipeline_notes: list | None = None,
     notifier=None,
 ) -> dict:
@@ -276,7 +284,17 @@ def run_pipeline(
         result,
         out_dir=output_dir,
         markdown_use_details=markdown_use_details,
+        final_notes_only=final_notes_only,
     )
+    if export_docx:
+        try:
+            export_paths["docx_path"] = export_word_from_markdown(
+                export_paths["md_path"],
+                out_dir=output_dir,
+                filename="result.docx",
+            )
+        except Exception as exc:
+            result["pipeline_notes"].append(f"word export failed: {exc}")
     result["export_paths"] = export_paths
     return result
 
@@ -350,6 +368,16 @@ def main() -> None:
         help="Optional confidence threshold for key point extraction",
     )
     parser.add_argument(
+        "--export-docx",
+        action="store_true",
+        help="Also export final result as Word (.docx)",
+    )
+    parser.add_argument(
+        "--full-report",
+        action="store_true",
+        help="Export full markdown report instead of final-notes-only markdown",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress per-file ingestion progress output",
@@ -369,14 +397,24 @@ def main() -> None:
     cls_conf = runtime_conf.get("classification", {}) or {}
     ocr_conf = runtime_conf.get("ocr", {}) or {}
     export_conf = runtime_conf.get("export", {}) or {}
+    final_notes_default = bool(export_conf.get("final_notes_only", True))
     topic_mode_effective = args.topic_mode or topic_conf.get("mode", "auto")
     web_mode_effective = args.web_enrichment_mode or web_conf.get("mode", "auto")
 
-    if topic_mode_effective == "api" and not os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip():
+    has_topic_api = bool(
+        os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
+    has_web_api = bool(
+        os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
+
+    if topic_mode_effective == "api" and not has_topic_api:
         print("[api] topic classifier: 请接入API后使用")
     if (
         bool(args.enable_web_enrichment) or bool(web_conf.get("enabled", False))
-    ) and web_mode_effective == "api" and not os.getenv("WEB_ENRICHMENT_API_URL", "").strip():
+    ) and web_mode_effective == "api" and not has_web_api:
         print("[api] web enrichment: 请接入API后使用")
 
     result = run_pipeline(
@@ -425,6 +463,8 @@ def main() -> None:
         ocr_languages=str(ocr_conf.get("languages", "chi_sim+eng")),
         ocr_fallback_language=str(ocr_conf.get("fallback_language", "eng")),
         markdown_use_details=bool(export_conf.get("markdown_use_details", False)),
+        final_notes_only=(not bool(args.full_report)) and final_notes_default,
+        export_docx=bool(args.export_docx or export_conf.get("export_docx", False)),
         pre_pipeline_notes=[f"runtime config warning: {w}" for w in conf_warnings],
         notifier=notifier,
     )
@@ -432,6 +472,8 @@ def main() -> None:
     print("Pipeline completed.")
     print(f"JSON: {result['export_paths']['json_path']}")
     print(f"MD:   {result['export_paths']['md_path']}")
+    if result["export_paths"].get("docx_path"):
+        print(f"DOCX: {result['export_paths']['docx_path']}")
     print(f"is_valid: {validation.get('is_valid')}")
     warnings = validation.get("warnings") or []
     print(f"warnings: {warnings if warnings else '(none)'}")

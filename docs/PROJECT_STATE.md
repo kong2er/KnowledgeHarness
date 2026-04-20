@@ -12,6 +12,7 @@ KnowledgeHarness/
 ├── .env.example
 ├── README.md
 ├── SKILL.md
+├── requirements-api.txt             # FastAPI service deps (optional)
 ├── app.py
 ├── requirements.txt
 ├── requirements-ocr.txt             # opt-in OCR backend
@@ -23,6 +24,7 @@ KnowledgeHarness/
 ├── .dockerignore
 ├── docs/
 │   ├── ACCEPTANCE.md
+│   ├── API_SETUP.md
 │   ├── ARCHITECTURE.md
 │   ├── API_SETUP.md
 │   ├── HANDOFF.md
@@ -41,13 +43,17 @@ KnowledgeHarness/
 │   ├── extract_keypoints.py
 │   ├── validate_result.py
 │   └── export_notes.py
+├── service/
+│   ├── api_server.py                # minimal FastAPI service entry
+│   └── simple_ui.py                 # minimal local web inspection UI (stdlib)
 ├── tests/
 │   ├── __init__.py
 │   ├── test_parse_inputs.py         # stdlib-only; runs via `python3 tests/...`
 │   ├── test_topic_coarse_classify.py
 │   ├── test_stage1_core.py
 │   ├── test_phase2_features.py
-│   └── test_phase3_non_api.py
+│   ├── test_phase3_non_api.py
+│   └── test_api_service_entry.py
 ├── samples/
 │   ├── demo.md
 │   ├── ingest_demo.docx             # docx happy path
@@ -128,6 +134,7 @@ KnowledgeHarness/
 
 - `tools/export_notes.py`
   - `result.json` + `result.md`
+  - 默认导出“最终整理笔记版” `result.md`（流程诊断保留在 `result.json`）
   - md 完整渲染 Stage 1（theme distribution）+ Stage 2（每类 count+preview）+ Stage 3（四个子列表）
   - `Failed Sources` 列出带 `reason` 的失败项
   - 新增 `Ingestion Summary` 小节（仅在存在 ingestion_summary 时显示）
@@ -136,6 +143,10 @@ KnowledgeHarness/
   - 支持 `markdown_use_details`（分类区块可折叠）
   - `review_needed` 与 `pipeline_notes` 分区呈现
   - `failed_sources` / `empty_extracted_sources` 仅在非空时显示
+
+- `tools/export_word.py`
+  - 从 `result.md` 生成基础 `result.docx`（可选）
+  - `python-docx` 依赖异常时降级，不中断主流程（记录 pipeline_notes）
 
 - `app.py`
   - CLI 串联全流程
@@ -154,7 +165,21 @@ KnowledgeHarness/
   - topic 层 warnings 进入 `pipeline_notes`（系统级）
   - web enrichment warnings 与 semantic conflict 摘要进入 `pipeline_notes`
   - 当用户显式选择 API 模式但 URL 未配置时，打印提示：`请接入API后使用`
+  - 支持统一 API 环境变量：`KNOWLEDGEHARNESS_API_URL / KNOWLEDGEHARNESS_API_KEY`
+  - 支持 `--export-docx`，可选导出 `result.docx`
+  - 支持 `--full-report` 切换为完整报告版 md（默认纯笔记版）
   - CLI 结尾打印 `is_valid` 与 warnings 摘要
+
+- `service/api_server.py`
+  - 提供最小 FastAPI 服务入口（`/health`、`/pipeline/run`、`/pipeline/capabilities`）
+  - 复用 `run_pipeline`，保持与 CLI 一致的降级语义
+  - 通过 `requirements-api.txt` 进行可选依赖安装
+
+- `service/simple_ui.py`
+  - 提供最简本地 Web 检查界面（stdlib `http.server`，无额外依赖）
+  - 支持输入路径、topic/web mode、keypoint 参数并直接触发 `run_pipeline`
+  - 支持上传文件、统一 API 设置页、可选 docx 导出
+  - 页面聚焦展示最终文档输出（`result.md` 内容）与导出路径
 
 - `tests/test_parse_inputs.py`
   - 仅覆盖"输入扩展与上传告知"模块的核心路径（不含 pytest 依赖，可直接 `python3` 运行）
@@ -177,9 +202,12 @@ KnowledgeHarness/
   - markdown details export
   - keypoint max_points 上限
 
+- `tests/test_api_service_entry.py`
+  - FastAPI 服务入口存在性检查（fastapi 缺失时 skip）
+
 ## 3) Not Implemented / Placeholder
 
-- HTTP API 服务层（FastAPI / Flask）未实现
+- Flask 服务入口未实现（当前仅 FastAPI 最小入口）
 - API 接口联调待外部接口规范与鉴权信息就绪
 - 全量 pytest 自动化测试套件未建立；当前为 5 份 stdlib-only 测试脚本（可直接 `python3 tests/<name>.py` 运行）：
   `test_parse_inputs.py` / `test_stage1_core.py` / `test_topic_coarse_classify.py` /

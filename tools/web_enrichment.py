@@ -72,7 +72,10 @@ def _call_enrichment_api(
     timeout_sec: float,
     max_items: int,
 ) -> List[Dict[str, str]]:
-    url = os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
+    url = (
+        os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
     if not url:
         raise RuntimeError("WEB_ENRICHMENT_API_URL is not configured")
 
@@ -119,7 +122,10 @@ def _call_enrichment_api(
     }
 
     headers = {"Content-Type": "application/json"}
-    api_key = os.getenv("WEB_ENRICHMENT_API_KEY", "").strip()
+    api_key = (
+        os.getenv("WEB_ENRICHMENT_API_KEY", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_KEY", "").strip()
+    )
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
@@ -193,7 +199,10 @@ def web_enrich(
         mode_norm = "auto"
         warnings.append("invalid web enrichment mode; fallback to auto")
 
-    api_configured = bool(os.getenv("WEB_ENRICHMENT_API_URL", "").strip())
+    api_configured = bool(
+        os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
     if mode_norm == "api" and not api_configured:
         warnings.append("web enrichment api 未配置，请接入API后使用")
         resources = _build_local_resources(documents, max_items=max_items)
