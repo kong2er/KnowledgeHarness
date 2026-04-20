@@ -182,6 +182,56 @@ def test_notifier_event_stream():
     _check("has one failed", names.count("failed") == 1, str(names))
 
 
+def test_pdf_encrypted_fails_gracefully():
+    print("[test] encrypted pdf fails gracefully")
+    try:
+        from pypdf import PdfWriter
+    except Exception as exc:
+        print(f"  SKIP: pypdf unavailable ({exc})")
+        return
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "encrypted.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.encrypt("secret")
+        with p.open("wb") as fp:
+            writer.write(fp)
+
+        result = parse_inputs([str(p)])
+        failed = result["logs"]["failed_sources"]
+        _check("one failed", len(failed) == 1, str(failed))
+        if failed:
+            _check(
+                "reason=parse_error",
+                failed[0]["reason"] == PARSE_ERROR,
+                str(failed[0]),
+            )
+
+
+def test_docx_heading_path_injected():
+    print("[test] docx heading path injected")
+    try:
+        from docx import Document
+    except Exception as exc:
+        _check("python-docx available", False, f"import failed: {exc}")
+        return
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "heading.docx"
+        doc = Document()
+        doc.add_heading("概念", level=1)
+        doc.add_paragraph("监督学习是一类方法。")
+        doc.save(str(p))
+
+        result = parse_inputs([str(p)])
+        docs = result["documents"]
+        _check("docx parsed", len(docs) == 1, str(result))
+        if docs:
+            txt = docs[0]["extracted_text"]
+            _check("contains heading path marker", "heading_path:" in txt, txt[:160])
+
+
 def main():
     print("=" * 60)
     print("Input Expansion + Ingestion Notice: minimal tests")
@@ -193,6 +243,8 @@ def main():
     test_docx_roundtrip()
     test_image_degrades_without_backend()
     test_notifier_event_stream()
+    test_pdf_encrypted_fails_gracefully()
+    test_docx_heading_path_injected()
     print("-" * 60)
     print(f"Result: {_passed} passed, {_failed} failed")
     sys.exit(0 if _failed == 0 else 1)

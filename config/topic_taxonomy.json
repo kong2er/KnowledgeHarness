@@ -1,0 +1,60 @@
+{
+  "labels": [
+    {
+      "label_id": "mathematics",
+      "display_name": "Mathematics",
+      "aliases": ["math", "mathematics", "数学", "高数", "微积分", "calculus", "linear algebra", "线性代数", "概率论"]
+    },
+    {
+      "label_id": "english",
+      "display_name": "English",
+      "aliases": ["english", "英语", "词汇", "语法", "阅读理解", "listening", "speaking"]
+    },
+    {
+      "label_id": "chinese",
+      "display_name": "Chinese",
+      "aliases": ["chinese", "语文", "古文", "现代文", "作文", "诗词"]
+    },
+    {
+      "label_id": "software_engineering",
+      "display_name": "Software Engineering",
+      "aliases": [
+        "software engineering", "软件工程", "system design", "架构",
+        "devops", "code review", "代码评审", "重构",
+        "unit test", "integration test", "集成测试", "自动化测试"
+      ]
+    },
+    {
+      "label_id": "machine_learning",
+      "display_name": "Machine Learning",
+      "aliases": [
+        "machine learning", "机器学习", "监督学习", "无监督学习",
+        "supervised learning", "unsupervised learning",
+        "训练集", "测试集", "验证集", "特征工程",
+        "scikit-learn", "sklearn", "xgboost", "random forest"
+      ]
+    },
+    {
+      "label_id": "deep_learning",
+      "display_name": "Deep Learning",
+      "aliases": [
+        "deep learning", "深度学习", "神经网络", "cnn", "rnn",
+        "transformer", "attention", "bert", "gpt"
+      ]
+    },
+    {
+      "label_id": "reinforcement_learning",
+      "display_name": "Reinforcement Learning",
+      "aliases": [
+        "reinforcement learning", "强化学习", "mdp", "policy",
+        "q-learning", "actor-critic", "奖励函数", "sparse reward",
+        "稀疏奖励"
+      ]
+    },
+    {
+      "label_id": "unknown_topic",
+      "display_name": "Unknown Topic",
+      "aliases": []
+    }
+  ]
+}

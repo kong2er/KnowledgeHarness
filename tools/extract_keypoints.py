@@ -35,9 +35,14 @@ def _dedup_texts(texts: List[str]) -> List[str]:
     return output
 
 
-def extract_keypoints(categorized: Dict[str, List[Dict[str, Any]]], max_points: int = 12) -> Dict[str, Any]:
+def extract_keypoints(
+    categorized: Dict[str, List[Dict[str, Any]]],
+    max_points: int = 12,
+    min_confidence: float = 0.0,
+) -> Dict[str, Any]:
     """Extract compact review key points from categorized chunks."""
     ordered_texts: List[str] = []
+    threshold = max(0.0, float(min_confidence))
     for cat in BUCKET_ORDER:
         bucket = categorized.get(cat, []) or []
         # Sort by confidence descending; ties keep original order.
@@ -47,6 +52,8 @@ def extract_keypoints(categorized: Dict[str, List[Dict[str, Any]]], max_points: 
             reverse=True,
         )
         for x in sorted_bucket:
+            if float(x.get("confidence", 0.0)) < threshold:
+                continue
             text = x.get("chunk_text", "")
             if text:
                 ordered_texts.append(text)
@@ -59,6 +66,7 @@ def extract_keypoints(categorized: Dict[str, List[Dict[str, Any]]], max_points: 
         "stats": {
             "total_candidates": len(merged),
             "selected": len(top_points),
+            "min_confidence": threshold,
         },
     }
 

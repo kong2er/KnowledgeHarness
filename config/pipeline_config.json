@@ -1,0 +1,36 @@
+{
+  "chunking": {
+    "max_chars": 500
+  },
+  "classification": {
+    "category_priority": [
+      "difficult_or_error_prone_points",
+      "extended_reading",
+      "methods_and_processes",
+      "examples_and_applications",
+      "basic_concepts"
+    ]
+  },
+  "key_points": {
+    "max_points": 12,
+    "min_confidence": 0.0
+  },
+  "topic": {
+    "mode": "auto",
+    "api_timeout_sec": 6.0,
+    "api_retries": 1
+  },
+  "web_enrichment": {
+    "enabled": false,
+    "mode": "auto",
+    "timeout_sec": 6.0,
+    "max_items": 8
+  },
+  "ocr": {
+    "languages": "chi_sim+eng",
+    "fallback_language": "eng"
+  },
+  "export": {
+    "markdown_use_details": false
+  }
+}

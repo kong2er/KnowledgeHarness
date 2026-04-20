@@ -12,7 +12,7 @@ Classification policy (acceptance baseline):
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 CATEGORIES = [
     "basic_concepts",
@@ -80,12 +80,16 @@ def _leading_label(text: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _score_chunk(chunk_text: str) -> Dict[str, int]:
+def _score_chunk(
+    chunk_text: str,
+    keywords: Dict[str, List[str]],
+    label_hints: Dict[str, List[str]],
+) -> Dict[str, int]:
     text_lower = (chunk_text or "").lower()
-    scores = {k: 0 for k in KEYWORDS}
+    scores = {k: 0 for k in keywords}
 
     # Body-level keyword matching (weak evidence, +1 per hit).
-    for category, words in KEYWORDS.items():
+    for category, words in keywords.items():
         for w in words:
             if w.lower() in text_lower:
                 scores[category] += 1
@@ -93,7 +97,7 @@ def _score_chunk(chunk_text: str) -> Dict[str, int]:
     # Leading-label matching (strong evidence, +3 once per category).
     label = _leading_label(chunk_text or "")
     if label:
-        for category, hints in LABEL_HINTS.items():
+        for category, hints in label_hints.items():
             for hint in hints:
                 if hint in label:
                     scores[category] += 3
@@ -102,18 +106,21 @@ def _score_chunk(chunk_text: str) -> Dict[str, int]:
     return scores
 
 
-def _priority_of(category: str) -> int:
+def _priority_of(category: str, category_priority: List[str]) -> int:
     try:
-        return CATEGORY_PRIORITY.index(category)
+        return category_priority.index(category)
     except ValueError:
-        return len(CATEGORY_PRIORITY)
+        return len(category_priority)
 
 
-def _choose_category(scores: Dict[str, int]) -> Tuple[str, float, str]:
+def _choose_category(
+    scores: Dict[str, int],
+    category_priority: List[str],
+) -> Tuple[str, float, str]:
     # Sort: higher score first; break ties by category priority.
     ordered = sorted(
         scores.items(),
-        key=lambda item: (-item[1], _priority_of(item[0])),
+        key=lambda item: (-item[1], _priority_of(item[0], category_priority)),
     )
     best_cat, best_score = ordered[0]
     second_score = ordered[1][1] if len(ordered) > 1 else 0
@@ -139,16 +146,28 @@ def _choose_category(scores: Dict[str, int]) -> Tuple[str, float, str]:
     return best_cat, confidence, "rule-based keyword match"
 
 
-def classify_notes(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+def classify_notes(
+    chunks: List[Dict[str, Any]],
+    keywords: Optional[Dict[str, List[str]]] = None,
+    label_hints: Optional[Dict[str, List[str]]] = None,
+    category_priority: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Classify chunks and produce review_needed for low-confidence items."""
+    keywords = keywords or KEYWORDS
+    label_hints = label_hints or LABEL_HINTS
+    category_priority = category_priority or CATEGORY_PRIORITY
+
     categorized: Dict[str, List[Dict[str, Any]]] = {c: [] for c in CATEGORIES}
     review_needed: List[Dict[str, Any]] = []
     enriched_chunks: List[Dict[str, Any]] = []
 
     for chunk in chunks:
         text = chunk.get("chunk_text", "")
-        scores = _score_chunk(text)
-        category, confidence, reason = _choose_category(scores)
+        scores = _score_chunk(text, keywords=keywords, label_hints=label_hints)
+        category, confidence, reason = _choose_category(
+            scores,
+            category_priority=category_priority,
+        )
 
         item = {
             **chunk,
@@ -157,6 +176,11 @@ def classify_notes(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "classification_reason": reason,
             "keyword_scores": scores,
         }
+        if category not in categorized:
+            item["category"] = "unclassified"
+            item["classification_reason"] = "out-of-scope category normalized"
+            item["confidence"] = 0.0
+            category = "unclassified"
         categorized[category].append(item)
         enriched_chunks.append(item)
 

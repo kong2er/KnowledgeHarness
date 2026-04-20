@@ -17,12 +17,14 @@ def _emit_list(lines: List[str], title: str, items: Iterable[str]) -> None:
         lines.append(f"  - {t}")
 
 
-def _render_markdown(result: Dict[str, Any]) -> str:
+def _render_markdown(result: Dict[str, Any], markdown_use_details: bool = False) -> str:
     overview = result.get("overview", {}) or {}
     categorized = result.get("categorized_notes", {}) or {}
+    topic_output = result.get("topic_classification", {}) or {}
     summaries = result.get("stage_summaries", {}) or {}
     key_points = (result.get("key_points", {}) or {}).get("key_points", []) or []
     web_resources = result.get("web_resources", []) or []
+    semantic_conflicts = result.get("semantic_conflicts", []) or []
     review_needed = result.get("review_needed", []) or []
     pipeline_notes = result.get("pipeline_notes", []) or []
     validation = result.get("validation", {}) or {}
@@ -40,6 +42,30 @@ def _render_markdown(result: Dict[str, Any]) -> str:
         lines.append(f"- Failed sources: {len(failed_sources)}")
     if empty_sources:
         lines.append(f"- Empty extracted sources: {len(empty_sources)}")
+
+    topic_stats = topic_output.get("stats", {}) or {}
+    topic_items = topic_output.get("items", []) or []
+    topic_mode = topic_output.get("mode_requested", "auto")
+    lines += [
+        "",
+        "## Topic Overview",
+        f"- Mode requested: {topic_mode}",
+        f"- Classified documents: {topic_stats.get('document_count', len(topic_items))}",
+        f"- API-assisted decisions: {topic_stats.get('used_api_count', 0)}",
+        f"- Degraded decisions: {topic_stats.get('degraded_count', 0)}",
+    ]
+    counts_by_label = topic_stats.get("counts_by_label", {}) or {}
+    if counts_by_label:
+        lines.append("- Counts by topic label:")
+        for label, count in counts_by_label.items():
+            lines.append(f"  - {label}: {count}")
+    if topic_items:
+        lines.append("- Per-source topic labels:")
+        for item in topic_items:
+            lines.append(
+                f"  - {item.get('source_name')} -> {item.get('topic_label')} "
+                f"(conf={item.get('confidence')}, api={item.get('used_api')})"
+            )
 
     # --- Ingestion summary (input-layer self-report) ---
     ingestion = overview.get("ingestion_summary") or {}
@@ -69,9 +95,14 @@ def _render_markdown(result: Dict[str, Any]) -> str:
 
     lines += ["", "## Categorized Notes"]
     for cat, items in categorized.items():
-        lines.append(f"### {cat}")
+        if markdown_use_details:
+            lines.append(f"<details><summary>{cat} (count={len(items)})</summary>")
+        else:
+            lines.append(f"### {cat}")
         if not items:
             lines.append("- (empty)")
+            if markdown_use_details:
+                lines.append("</details>")
             lines.append("")
             continue
         for i in items:
@@ -80,6 +111,8 @@ def _render_markdown(result: Dict[str, Any]) -> str:
                 f"- [{i.get('chunk_id')}] ({i.get('source_name')}) "
                 f"conf={conf} {i.get('chunk_text', '')[:180]}"
             )
+        if markdown_use_details:
+            lines.append("</details>")
         lines.append("")
 
     # --- Stage Summaries ---
@@ -151,6 +184,16 @@ def _render_markdown(result: Dict[str, Any]) -> str:
         for e in empty_sources:
             lines.append(f"- {e}")
 
+    if semantic_conflicts:
+        lines += ["", "## Semantic Conflicts (Heuristic)"]
+        for c in semantic_conflicts:
+            a = c.get("chunk_a", {}) or {}
+            b = c.get("chunk_b", {}) or {}
+            lines.append(
+                f"- {c.get('reason')} | "
+                f"{a.get('chunk_id')} vs {b.get('chunk_id')}"
+            )
+
     # --- Review needed (chunk-level only) ---
     lines += ["", "## Review Needed"]
     if not review_needed:
@@ -181,7 +224,11 @@ def _render_markdown(result: Dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def export_notes(result: Dict[str, Any], out_dir: str | Path = "outputs") -> Dict[str, str]:
+def export_notes(
+    result: Dict[str, Any],
+    out_dir: str | Path = "outputs",
+    markdown_use_details: bool = False,
+) -> Dict[str, str]:
     """Export result as JSON + Markdown files."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -190,7 +237,10 @@ def export_notes(result: Dict[str, Any], out_dir: str | Path = "outputs") -> Dic
     md_path = out / "result.md"
 
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    md_path.write_text(_render_markdown(result), encoding="utf-8")
+    md_path.write_text(
+        _render_markdown(result, markdown_use_details=markdown_use_details),
+        encoding="utf-8",
+    )
 
     return {
         "json_path": str(json_path.resolve()),

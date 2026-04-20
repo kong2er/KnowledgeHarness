@@ -1,0 +1,23 @@
+{
+  "topic_classifier": {
+    "system_prompt": "你是受约束的主题粗分类器。你只能从 allowed_labels 中选择 topic_label，不能发明新标签。不确定时返回 unknown_topic。请给出 0~1 的 confidence，并给出简短 reason。",
+    "output_contract": {
+      "topic_label": "string (must be one of allowed_labels)",
+      "confidence": "number between 0 and 1",
+      "reason": "short string"
+    }
+  },
+  "web_enrichment": {
+    "system_prompt": "你是受约束的补充资源提取器。你只能返回与用户资料相关的补充条目，不得覆盖用户原文结论。每条必须包含 title/url/purpose/relevance_reason。",
+    "output_contract": {
+      "resources": [
+        {
+          "title": "string",
+          "url": "string",
+          "purpose": "string",
+          "relevance_reason": "string"
+        }
+      ]
+    }
+  }
+}

@@ -14,6 +14,9 @@ def validate_result(
     stage_summaries: Dict[str, Any],
     failed_sources: Optional[List[Dict[str, Any]]] = None,
     empty_sources: Optional[List[str]] = None,
+    web_resources: Optional[List[Dict[str, Any]]] = None,
+    web_enrichment_enabled: bool = False,
+    semantic_conflicts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Validate classification and summary completeness.
 
@@ -25,9 +28,14 @@ def validate_result(
             so downstream consumers can surface the fact.
         empty_sources: Optional list of sources that parsed successfully
             but yielded empty extracted text.
+        web_resources: Optional enrichment resources.
+        web_enrichment_enabled: Whether enrichment checks should be enforced.
+        semantic_conflicts: Optional semantic conflict records.
     """
     failed_sources = failed_sources or []
     empty_sources = empty_sources or []
+    web_resources = web_resources or []
+    semantic_conflicts = semantic_conflicts or []
 
     categorized = classification_output.get("categorized", {})
     all_chunks = classification_output.get("chunks", [])
@@ -80,6 +88,19 @@ def validate_result(
     if empty_sources:
         warnings.append(f"empty_extracted_sources:{len(empty_sources)}")
 
+    if web_enrichment_enabled:
+        missing_url = sum(1 for item in web_resources if not (item or {}).get("url"))
+        if missing_url > 0:
+            warnings.append(f"web_resources_missing_url:{missing_url}")
+        missing_relevance = sum(
+            1 for item in web_resources if not (item or {}).get("relevance_reason")
+        )
+        if missing_relevance > 0:
+            warnings.append(f"web_resources_missing_relevance_reason:{missing_relevance}")
+
+    if semantic_conflicts:
+        warnings.append(f"semantic_conflicts_detected:{len(semantic_conflicts)}")
+
     return {
         "is_valid": len(warnings) == 0,
         "warnings": warnings,
@@ -88,6 +109,8 @@ def validate_result(
             "duplicate_chunk_ids": duplicated_ids,
             "failed_sources_count": len(failed_sources),
             "empty_sources_count": len(empty_sources),
+            "web_resources_count": len(web_resources),
+            "semantic_conflict_count": len(semantic_conflicts),
         },
     }
 

@@ -18,6 +18,7 @@ KnowledgeHarness 是一个面向学习资料整理的工程化流水线工具，
 | `docs/ARCHITECTURE.md` | 模块与数据契约 |
 | `docs/ACCEPTANCE.md` | 模块级与通用 Gate 的验收条件 |
 | `docs/HANDOFF.md` | 当前版本交接结论 |
+| `docs/API_SETUP.md` | API 接入最小说明（环境变量 + 请求格式） |
 | `docs/TODO.md` | 已登记未完成事项 |
 | `.codex/session_rules.md` | 会话级前置门禁 |
 | `project_memory/` | 历史对话副本，非权威 |
@@ -26,30 +27,47 @@ KnowledgeHarness 是一个面向学习资料整理的工程化流水线工具，
 
 1. 输入解析
    - 默认支持：`.txt` / `.md` / `.pdf` / `.docx`（`python-docx`）
+   - docx 样式感知：抽取 heading 层级并以内联 `heading_path` 注入正文，帮助后续分类
    - **Opt-in OCR**：`.png` / `.jpg` / `.jpeg` 需额外安装 `requirements-ocr.txt` 与 `tesseract` 系统二进制；未安装时不伪装成功，而是记录 `failed_sources[*].reason == "ocr_backend_unavailable"`
    - 解析失败源 → `logs.failed_sources`（带 `reason`：`unsupported_file_type` / `file_not_found` / `parse_error` / `ocr_backend_unavailable`）
    - 解析成功但正文空 → `logs.empty_extracted_sources`
    - `overview.ingestion_summary`：运行期自报"本次真实可用扩展集 + OCR 后端状态"
 2. 文本切分：按段落 → 句子 → 字符三级 fallback，保证不超 `max_chars`
-3. 规则分类（关键词 + 起始标签双路打分，tie-break 走 `CATEGORY_PRIORITY`）：
+3. **主题粗分类层（Topic Coarse Classification）**：
+   - 文档级粗分类（source/document 粒度），不替代 chunk 级分类
+   - 标签来自本地约束集合：`config/topic_taxonomy.json`
+   - 支持 `--topic-mode auto|local|api`（默认 `auto`）
+   - API 为可选协助；任何异常都会降级（`unknown_topic` / local rule），不中断主流程
+4. 规则分类（关键词 + 起始标签双路打分，tie-break 走 `CATEGORY_PRIORITY`）：
    - `basic_concepts`
    - `methods_and_processes`
    - `examples_and_applications`
    - `difficult_or_error_prone_points`
    - `extended_reading`
    - `unclassified`
-4. 三阶段总结：`stage_1 / stage_2 / stage_3`
-5. 重点提炼：按类别优先级 + 置信度降序聚合并去重
-6. 结果校验：未分类比例、空主分类、重复内容、阶段总结缺失、failed/empty 源提示
-7. 导出：`outputs/result.json` + `outputs/result.md`（Stage 1/2/3 完整渲染 + Ingestion Summary）
+5. 三阶段总结：`stage_1 / stage_2 / stage_3`
+6. 重点提炼：按类别优先级 + 置信度降序聚合并去重
+   - 支持可选阈值：`--keypoint-min-confidence`
+7. 可开关 Web Enrichment：
+   - `--enable-web-enrichment --web-enrichment-mode off|local|api|auto`
+   - `local` 模式从用户资料中提取 URL；`api`/`auto` 支持外部协助并失败降级
+   - 输出严格保留：`title / url / purpose / relevance_reason`
+8. 语义冲突检测（最小规则版）：
+   - 在 chunk 级声明中检测互斥主张（如“必须/不需要”、“可以/不可以”）
+   - 结果写入 `semantic_conflicts` 并进入 validation/pipeline notes
+9. 结果校验：未分类比例、空主分类、重复内容、阶段总结缺失、failed/empty 源提示、web 资源字段缺失（启用 enrichment 时）、语义冲突告警
+10. 导出：`outputs/result.json` + `outputs/result.md`（Stage 1/2/3 完整渲染 + Ingestion Summary + Topic Overview + Semantic Conflicts）
+11. 运行时配置与交付增强：
+   - 支持 `config/pipeline_config.json`（分块长度、关键词规则、OCR 语言、导出折叠等）
+   - 支持 Markdown 折叠导出（`export.markdown_use_details`）
+   - 提供 OCR-ready Docker 交付基础（`Dockerfile`）
 
 ## 当前未实现或占位（必须知晓）
 
-- Web enrichment 仍是占位：`web_resources = []`，**未接入搜索工具**
-- 语义冲突检测未实现（仅做重复检测）
 - **图片 OCR 是 opt-in**：默认环境下图片输入会优雅降级为 `ocr_backend_unavailable`；仅在安装 `requirements-ocr.txt` 并具备 `tesseract` 二进制时才真正 OCR
 - API 服务（Flask / FastAPI）未实现
-- 自动化测试：仅针对"输入扩展与上传告知"模块补了最小 stdlib 测试（`tests/test_parse_inputs.py`），尚未建立 pytest 套件
+- 主题粗分类的远程 API 仅提供可选接入点，默认不依赖外部服务
+- 自动化测试：已提供多份 stdlib 测试脚本（`tests/test_parse_inputs.py` / `tests/test_stage1_core.py` / `tests/test_topic_coarse_classify.py` / `tests/test_phase2_features.py` / `tests/test_phase3_non_api.py`），尚未建立 pytest 套件
 
 ## 运行方式
 
@@ -67,33 +85,68 @@ pip install -r requirements-ocr.txt
 sudo apt-get install tesseract-ocr tesseract-ocr-chi-sim
 ```
 
-3. 执行（单文件 / 目录 / 通配符均可；项目元目录会被自动跳过）：
+3.（可选）接入 API（主题粗分类 / web enrichment）：
+
+```bash
+cp .env.example .env
+# 编辑 .env，填入 TOPIC_CLASSIFIER_API_URL / WEB_ENRICHMENT_API_URL 等
+```
+
+默认 API 请求格式模板：
+- `config/api_payload_templates.json`
+- 未配置 API 时，CLI 会提示：`请接入API后使用`
+
+4. 执行（单文件 / 目录 / 通配符均可；项目元目录会被自动跳过）：
 
 ```bash
 python3 app.py samples/demo.md --output-dir outputs
+# 指定运行时配置
+python3 app.py samples/demo.md --output-dir outputs --config config/pipeline_config.json
 # 多类型混合输入
 python3 app.py samples/ --output-dir outputs
+# 强制仅本地主题粗分类（禁用 API 协助）
+python3 app.py samples/ --output-dir outputs --topic-mode local
+# 使用自定义 topic taxonomy
+python3 app.py samples/ --output-dir outputs --topic-taxonomy config/topic_taxonomy.json
+# 启用最小 web enrichment（本地 URL 提取模式）
+python3 app.py samples/ --output-dir outputs --enable-web-enrichment --web-enrichment-mode local
+# 只保留置信度>=0.6 的 key points
+python3 app.py samples/ --output-dir outputs --keypoint-min-confidence 0.6
 # 静默（不输出 [ingest] 进度）
 python3 app.py samples/ --output-dir outputs --quiet
 ```
 
-4. 查看结果：
+5. 查看结果：
 
 - `outputs/result.json`
 - `outputs/result.md`
 
-5. 运行本模块的最小测试（不依赖 pytest）：
+6. 运行本模块的最小测试（不依赖 pytest）：
 
 ```bash
 python3 tests/test_parse_inputs.py
+python3 tests/test_stage1_core.py
+python3 tests/test_topic_coarse_classify.py
+python3 tests/test_phase2_features.py
+python3 tests/test_phase3_non_api.py
+```
+
+7. Docker 运行（OCR-ready）：
+
+```bash
+docker build -t knowledgeharness .
+docker run --rm -v "$PWD/samples:/data" knowledgeharness \
+  python app.py /data/demo.md --output-dir /data/out
 ```
 
 ## 输出结构契约
 
 - `overview`：`source_count` / `chunk_count` / `failed_sources` / `empty_extracted_sources` / `ingestion_summary`
 - `source_documents`
-- `categorized_notes` / `stage_summaries` / `key_points`
-- `web_resources`（占位）
+- `topic_classification`（document 级 topic label / confidence / reason / fallback_state）
+- `categorized_notes` / `stage_summaries` / `key_points`（`stats.min_confidence`）
+- `web_resources`（启用 enrichment 时产出）
+- `semantic_conflicts`（启发式冲突对）
 - `review_needed`（仅 chunk 级问题）
 - `pipeline_notes`（系统级警告，如 validation warnings、"no usable input text"）
 - `validation`（`is_valid` + `warnings` + `stats`）

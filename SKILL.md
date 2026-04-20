@@ -21,12 +21,13 @@ Authoritative acceptance source: `docs/ACCEPTANCE.md`.
 
 1. Parse inputs
 2. Chunk notes
-3. Classify chunks
-4. Stage summarize
-5. Extract key points
-6. Web enrichment (not implemented in MVP; placeholder returns `[]`)
-7. Validate
-8. Export
+3. Topic coarse classify (document-level; constrained labels)
+4. Classify chunks (content-type)
+5. Stage summarize
+6. Extract key points
+7. Web enrichment (switchable; supplementary only)
+8. Validate
+9. Export
 
 If one stage has no valid input, record it and continue; do not crash the full pipeline.
 
@@ -43,15 +44,18 @@ Allowed categories:
 Rules:
 - Ties are resolved by `CATEGORY_PRIORITY` inside `tools/classify_notes.py`, not by dumping everything into `unclassified`.
 - Chunks with zero keyword hits, or with `confidence < 0.4`, must be appended to `review_needed` with a reason.
+- key point extraction may apply a configurable `min_confidence` threshold for final output control.
 
 ## Output Constraints
 
 Final output (JSON + Markdown) must contain at least:
 - `overview` (with `source_count`, `chunk_count`, `failed_sources`, `empty_extracted_sources`)
 - `categorized_notes`
+- `topic_classification`
 - `stage_summaries` (all three of `stage_1`, `stage_2`, `stage_3` always present)
 - `key_points`
 - `web_resources`
+- `semantic_conflicts` (heuristic conflicts)
 - `review_needed` (chunk-level only)
 - `pipeline_notes` (system-level messages, e.g. validation warnings)
 - `validation`
@@ -73,8 +77,7 @@ The validator must flag:
 - `empty_extracted_sources:<count>`
 
 Not implemented in MVP (tracked in `docs/TODO.md`):
-- semantic conflict detection between chunks
-- missing-link check for external resources (only meaningful once enrichment lands)
+- advanced semantic conflict resolution (NLI/embedding-based)
 
 ## Prohibitions
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -12,8 +13,12 @@ from tools.classify_notes import classify_notes
 from tools.export_notes import export_notes
 from tools.extract_keypoints import extract_keypoints
 from tools.parse_inputs import SUPPORTED_EXTENSIONS, parse_inputs
+from tools.detect_semantic_conflicts import detect_semantic_conflicts
+from tools.runtime_config import load_runtime_config
 from tools.stage_summarize import stage_summarize
+from tools.topic_coarse_classify import topic_coarse_classify
 from tools.validate_result import validate_result
+from tools.web_enrichment import web_enrich
 
 # Directories that are part of the project itself; when the user points
 # app.py at a parent directory we skip these to avoid treating project
@@ -117,46 +122,129 @@ def _cli_ingest_notifier(event: str, payload: Dict[str, Any]) -> None:
         )
 
 
+def _load_local_env(path: str = ".env") -> None:
+    """Load KEY=VALUE pairs from local .env (without overriding existing env)."""
+    env_file = Path(path)
+    if not env_file.exists() or not env_file.is_file():
+        return
+
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        key, val = s.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
 def run_pipeline(
     input_files: List[str],
     output_dir: str = "outputs",
+    topic_taxonomy_path: str | None = None,
+    topic_mode: str = "auto",
+    topic_api_timeout: float = 6.0,
+    topic_api_retries: int = 1,
+    web_enrichment_enabled: bool = False,
+    web_enrichment_mode: str = "auto",
+    web_enrichment_timeout: float = 6.0,
+    web_enrichment_max_items: int = 8,
+    keypoint_min_confidence: float = 0.0,
+    keypoint_max_points: int = 12,
+    chunk_max_chars: int = 500,
+    classification_keywords: dict | None = None,
+    classification_label_hints: dict | None = None,
+    classification_category_priority: list | None = None,
+    ocr_languages: str = "chi_sim+eng",
+    ocr_fallback_language: str = "eng",
+    markdown_use_details: bool = False,
+    pre_pipeline_notes: list | None = None,
     notifier=None,
 ) -> dict:
-    parsed = parse_inputs(input_files, notifier=notifier)
+    parsed = parse_inputs(
+        input_files,
+        notifier=notifier,
+        ocr_languages=ocr_languages,
+        ocr_fallback_language=ocr_fallback_language,
+    )
     documents = parsed["documents"]
     logs = parsed.get("logs", {}) or {}
     failed_sources = logs.get("failed_sources", []) or []
     empty_sources = logs.get("empty_extracted_sources", []) or []
     ingestion_summary = parsed.get("ingestion_summary", {}) or {}
 
-    chunks = chunk_notes(documents)
-    classified_output = classify_notes(chunks)
+    chunks = chunk_notes(documents, max_chars=chunk_max_chars)
+    topic_output = topic_coarse_classify(
+        documents,
+        taxonomy_path=topic_taxonomy_path,
+        mode=topic_mode,
+        api_timeout_sec=topic_api_timeout,
+        api_retries=topic_api_retries,
+    )
+    classified_output = classify_notes(
+        chunks,
+        keywords=classification_keywords,
+        label_hints=classification_label_hints,
+        category_priority=classification_category_priority,
+    )
 
     # Must classify before summarize.
     summaries = stage_summarize(documents, classified_output["categorized"])
-    keypoints = extract_keypoints(classified_output["categorized"])
+    keypoints = extract_keypoints(
+        classified_output["categorized"],
+        max_points=keypoint_max_points,
+        min_confidence=keypoint_min_confidence,
+    )
 
-    # MVP: external resources placeholder (user content remains primary).
-    # Expected schema once enrichment lands: title / url / purpose / relevance_reason.
-    web_resources: List[dict] = []
+    enrichment_output = web_enrich(
+        documents,
+        enabled=web_enrichment_enabled,
+        mode=web_enrichment_mode,
+        timeout_sec=web_enrichment_timeout,
+        max_items=web_enrichment_max_items,
+    )
+    web_resources: List[dict] = enrichment_output.get("resources", []) or []
+    semantic_conflicts = detect_semantic_conflicts(
+        classified_output.get("chunks", []) or []
+    )
 
     validation = validate_result(
         classified_output,
         summaries,
         failed_sources=failed_sources,
         empty_sources=empty_sources,
+        web_resources=web_resources,
+        web_enrichment_enabled=web_enrichment_enabled,
+        semantic_conflicts=semantic_conflicts,
     )
 
     # review_needed stays chunk-level only; system-level signals go to
     # pipeline_notes so the two concerns do not cross-contaminate.
     review_needed = list(classified_output.get("review_needed", []))
-    pipeline_notes: List[str] = []
+    pipeline_notes: List[str] = list(pre_pipeline_notes or [])
 
     # Surface "no usable input text" so downstream readers understand why
     # categorized_notes / key_points may be empty.
     if input_files and not documents:
         pipeline_notes.append(
             "no usable input text: every detected file failed or was empty"
+        )
+
+    if topic_output.get("warnings"):
+        pipeline_notes.append(
+            "topic coarse classification warnings: "
+            + " | ".join(topic_output["warnings"])
+        )
+
+    if enrichment_output.get("warnings"):
+        pipeline_notes.append(
+            "web enrichment warnings: " + " | ".join(enrichment_output["warnings"])
+        )
+
+    if semantic_conflicts:
+        pipeline_notes.append(
+            f"semantic conflicts detected: {len(semantic_conflicts)} pair(s)"
         )
 
     if validation.get("warnings"):
@@ -173,37 +261,173 @@ def run_pipeline(
             "ingestion_summary": ingestion_summary,
         },
         "source_documents": documents,
+        "topic_classification": topic_output,
         "categorized_notes": classified_output["categorized"],
         "stage_summaries": summaries,
         "key_points": keypoints,
         "web_resources": web_resources,
+        "semantic_conflicts": semantic_conflicts,
         "review_needed": review_needed,
         "pipeline_notes": pipeline_notes,
         "validation": validation,
     }
 
-    export_paths = export_notes(result, out_dir=output_dir)
+    export_paths = export_notes(
+        result,
+        out_dir=output_dir,
+        markdown_use_details=markdown_use_details,
+    )
     result["export_paths"] = export_paths
     return result
 
 
 def main() -> None:
+    _load_local_env(".env")
     parser = argparse.ArgumentParser(description="KnowledgeHarness MVP")
     parser.add_argument("inputs", nargs="+", help="Input files / dirs / globs")
     parser.add_argument("--output-dir", default="outputs", help="Output directory")
+    parser.add_argument(
+        "--config",
+        default="config/pipeline_config.json",
+        help="Runtime config JSON path",
+    )
+    parser.add_argument(
+        "--topic-taxonomy",
+        default="config/topic_taxonomy.json",
+        help="Path to constrained topic label taxonomy JSON",
+    )
+    parser.add_argument(
+        "--topic-mode",
+        default=None,
+        choices=["auto", "local", "api"],
+        help="Topic coarse classifier mode: auto/local/api",
+    )
+    parser.add_argument(
+        "--topic-api-timeout",
+        default=None,
+        type=float,
+        help="Timeout seconds for optional topic API calls",
+    )
+    parser.add_argument(
+        "--topic-api-retries",
+        default=None,
+        type=int,
+        help="Retry count for topic API on recoverable failures",
+    )
+    parser.add_argument(
+        "--enable-web-enrichment",
+        action="store_true",
+        help="Enable supplementary web enrichment",
+    )
+    parser.add_argument(
+        "--web-enrichment-mode",
+        default=None,
+        choices=["off", "local", "api", "auto"],
+        help="Web enrichment mode",
+    )
+    parser.add_argument(
+        "--web-enrichment-timeout",
+        default=None,
+        type=float,
+        help="Timeout seconds for web enrichment API calls",
+    )
+    parser.add_argument(
+        "--web-enrichment-max-items",
+        default=None,
+        type=int,
+        help="Maximum web resources to keep",
+    )
+    parser.add_argument(
+        "--keypoint-max-points",
+        default=None,
+        type=int,
+        help="Maximum number of key points",
+    )
+    parser.add_argument(
+        "--keypoint-min-confidence",
+        default=None,
+        type=float,
+        help="Optional confidence threshold for key point extraction",
+    )
     parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress per-file ingestion progress output",
     )
     args = parser.parse_args()
+    runtime_conf, conf_warnings = load_runtime_config(args.config)
 
     files = collect_input_files(args.inputs)
     if not files:
         raise SystemExit("No valid input files found.")
 
     notifier = None if args.quiet else _cli_ingest_notifier
-    result = run_pipeline(files, output_dir=args.output_dir, notifier=notifier)
+    topic_conf = runtime_conf.get("topic", {}) or {}
+    web_conf = runtime_conf.get("web_enrichment", {}) or {}
+    key_conf = runtime_conf.get("key_points", {}) or {}
+    chunk_conf = runtime_conf.get("chunking", {}) or {}
+    cls_conf = runtime_conf.get("classification", {}) or {}
+    ocr_conf = runtime_conf.get("ocr", {}) or {}
+    export_conf = runtime_conf.get("export", {}) or {}
+    topic_mode_effective = args.topic_mode or topic_conf.get("mode", "auto")
+    web_mode_effective = args.web_enrichment_mode or web_conf.get("mode", "auto")
+
+    if topic_mode_effective == "api" and not os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip():
+        print("[api] topic classifier: 请接入API后使用")
+    if (
+        bool(args.enable_web_enrichment) or bool(web_conf.get("enabled", False))
+    ) and web_mode_effective == "api" and not os.getenv("WEB_ENRICHMENT_API_URL", "").strip():
+        print("[api] web enrichment: 请接入API后使用")
+
+    result = run_pipeline(
+        files,
+        output_dir=args.output_dir,
+        topic_taxonomy_path=args.topic_taxonomy,
+        topic_mode=topic_mode_effective,
+        topic_api_timeout=float(
+            args.topic_api_timeout
+            if args.topic_api_timeout is not None
+            else topic_conf.get("api_timeout_sec", 6.0)
+        ),
+        topic_api_retries=int(
+            args.topic_api_retries
+            if args.topic_api_retries is not None
+            else topic_conf.get("api_retries", 1)
+        ),
+        web_enrichment_enabled=(
+            bool(args.enable_web_enrichment) or bool(web_conf.get("enabled", False))
+        ),
+        web_enrichment_mode=web_mode_effective,
+        web_enrichment_timeout=float(
+            args.web_enrichment_timeout
+            if args.web_enrichment_timeout is not None
+            else web_conf.get("timeout_sec", 6.0)
+        ),
+        web_enrichment_max_items=int(
+            args.web_enrichment_max_items
+            if args.web_enrichment_max_items is not None
+            else web_conf.get("max_items", 8)
+        ),
+        keypoint_min_confidence=float(
+            args.keypoint_min_confidence
+            if args.keypoint_min_confidence is not None
+            else key_conf.get("min_confidence", 0.0)
+        ),
+        keypoint_max_points=int(
+            args.keypoint_max_points
+            if args.keypoint_max_points is not None
+            else key_conf.get("max_points", 12)
+        ),
+        chunk_max_chars=int(chunk_conf.get("max_chars", 500)),
+        classification_keywords=cls_conf.get("keywords"),
+        classification_label_hints=cls_conf.get("label_hints"),
+        classification_category_priority=cls_conf.get("category_priority"),
+        ocr_languages=str(ocr_conf.get("languages", "chi_sim+eng")),
+        ocr_fallback_language=str(ocr_conf.get("fallback_language", "eng")),
+        markdown_use_details=bool(export_conf.get("markdown_use_details", False)),
+        pre_pipeline_notes=[f"runtime config warning: {w}" for w in conf_warnings],
+        notifier=notifier,
+    )
     validation = result.get("validation", {}) or {}
     print("Pipeline completed.")
     print(f"JSON: {result['export_paths']['json_path']}")

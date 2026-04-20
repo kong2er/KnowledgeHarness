@@ -28,6 +28,7 @@ real-time ingestion progress without coupling this module to stdout.
 from __future__ import annotations
 
 import shutil
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -109,10 +110,42 @@ def _read_docx_file(path: Path) -> str:
 
     document = Document(str(path))
     parts: List[str] = []
+    heading_stack: Dict[int, str] = {}
+
+    def _heading_level(style_name: str) -> Optional[int]:
+        raw = (style_name or "").strip()
+        s = raw.lower()
+        # English style variants: Heading 1 / Heading1 / heading 2 ...
+        m = re.match(r"heading\s*(\d*)", s)
+        if m:
+            num = m.group(1)
+            return int(num) if num else 1
+        # Chinese localized style variants, e.g. 标题 1 / 标题1
+        if "标题" in raw:
+            m = re.search(r"标题\s*(\d*)", raw)
+            if m:
+                num = m.group(1)
+                return int(num) if num else 1
+        return None
 
     for para in document.paragraphs:
         text = (para.text or "").strip()
-        if text:
+        if not text:
+            continue
+
+        level = _heading_level(getattr(getattr(para, "style", None), "name", ""))
+        if level is not None:
+            heading_stack[level] = text
+            for k in list(heading_stack.keys()):
+                if k > level:
+                    del heading_stack[k]
+            parts.append(text)
+            continue
+
+        if heading_stack:
+            path_text = " > ".join(heading_stack[k] for k in sorted(heading_stack.keys()))
+            parts.append(f"{text} [heading_path: {path_text}]")
+        else:
             parts.append(text)
 
     for table in document.tables:
@@ -167,7 +200,11 @@ def _probe_ocr_backend() -> Tuple[bool, str]:
     return _OCR_PROBE_CACHE
 
 
-def _read_image_file(path: Path) -> str:
+def _read_image_file(
+    path: Path,
+    ocr_languages: str = "chi_sim+eng",
+    ocr_fallback_language: str = "eng",
+) -> str:
     available, detail = _probe_ocr_backend()
     if not available:
         raise OCRBackendUnavailable(detail)
@@ -179,9 +216,9 @@ def _read_image_file(path: Path) -> str:
         # Prefer Chinese+English joint OCR; fall back to English-only when
         # the chi_sim language pack is unavailable.
         try:
-            text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+            text = pytesseract.image_to_string(img, lang=ocr_languages)
         except pytesseract.TesseractError:
-            text = pytesseract.image_to_string(img, lang="eng")
+            text = pytesseract.image_to_string(img, lang=ocr_fallback_language)
 
     return (text or "").strip()
 
@@ -189,7 +226,11 @@ def _read_image_file(path: Path) -> str:
 # --- Per-file dispatch --------------------------------------------------
 
 
-def parse_single_file(path: str | Path) -> Dict[str, Any]:
+def parse_single_file(
+    path: str | Path,
+    ocr_languages: str = "chi_sim+eng",
+    ocr_fallback_language: str = "eng",
+) -> Dict[str, Any]:
     """Parse one file into a normalized document object.
 
     Raises:
@@ -213,7 +254,11 @@ def parse_single_file(path: str | Path) -> Dict[str, Any]:
     elif ext in DOCX_EXTENSIONS:
         extracted = _read_docx_file(file_path)
     elif ext in IMAGE_EXTENSIONS:
-        extracted = _read_image_file(file_path)
+        extracted = _read_image_file(
+            file_path,
+            ocr_languages=ocr_languages,
+            ocr_fallback_language=ocr_fallback_language,
+        )
     else:  # pragma: no cover - SUPPORTED_EXTENSIONS covers all branches
         raise UnsupportedFileType(f"Unsupported file type: {file_path.name}")
 
@@ -269,6 +314,8 @@ def _build_failed_entry(
 def parse_inputs(
     paths: Iterable[str | Path],
     notifier: Optional[Notifier] = None,
+    ocr_languages: str = "chi_sim+eng",
+    ocr_fallback_language: str = "eng",
 ) -> Dict[str, Any]:
     """Parse multiple input files with optional progress notification.
 
@@ -340,7 +387,11 @@ def parse_inputs(
         )
 
         try:
-            doc = parse_single_file(path)
+            doc = parse_single_file(
+                path,
+                ocr_languages=ocr_languages,
+                ocr_fallback_language=ocr_fallback_language,
+            )
         except UnsupportedFileType as exc:
             failed_sources.append(
                 _build_failed_entry(path, ext, UNSUPPORTED_FILE_TYPE, str(exc))
