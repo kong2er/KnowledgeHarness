@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 
 def _emit_list(lines: List[str], title: str, items: Iterable[str]) -> None:
@@ -224,76 +224,184 @@ def _render_markdown(result: Dict[str, Any], markdown_use_details: bool = False)
     return "\n".join(lines).strip() + "\n"
 
 
+import re as _re
+
+# Leading category marker like "概念：" / "方法步骤：" / "例如：" / "易错点：" /
+# "扩展阅读：" that the classifier uses as a strong signal. In the final
+# notes markdown, the section header already tells the reader *what* the
+# entry is, so repeating this prefix is pure noise.
+_LEADING_CATEGORY_PREFIX_RE = _re.compile(
+    r"^\s*(?:"
+    r"概念|定义|本质|原理|含义|"
+    r"方法步骤|方法|步骤|流程|过程|实现|"
+    r"例如|例子|案例|应用|场景|实战|举例|demo|"
+    r"易错点|易错|难点|注意事项|注意|陷阱|坑|常见错误|误区|"
+    r"扩展阅读|延伸阅读|参考资料|参考|延伸"
+    r")\s*[:：]\s*",
+    flags=_re.IGNORECASE,
+)
+
+# Trailing "[heading_path: xxx > yyy]" marker that `parse_inputs._read_docx_file`
+# injects to give the downstream classifier awareness of the document's
+# outline. It is an *intermediate* signal and must not appear in the final
+# human-facing notes.
+_TRAILING_HEADING_PATH_RE = _re.compile(
+    r"\s*\[heading_path:\s*[^\]]+\]\s*$",
+    flags=_re.IGNORECASE,
+)
+
+
+def _clean_note_text(text: str) -> str:
+    """Strip classifier-facing noise from a chunk before rendering as a note."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    t = _LEADING_CATEGORY_PREFIX_RE.sub("", t, count=1)
+    t = _TRAILING_HEADING_PATH_RE.sub("", t)
+    return t.strip()
+
+
+def _format_topic_summary(
+    topic_items: List[Dict[str, Any]],
+    label_definitions: List[Dict[str, Any]],
+) -> List[str]:
+    """Return markdown bullet lines describing the topic distribution.
+
+    - uses `display_name` from the taxonomy instead of raw label_id
+    - deduplicates and counts when multiple sources share a topic
+    - single-source documents still render as "- <display>"
+    """
+    display_map = {
+        str(item.get("label_id", "")): str(item.get("display_name") or item.get("label_id") or "")
+        for item in (label_definitions or [])
+    }
+
+    counts: Dict[str, int] = {}
+    for it in topic_items:
+        label = str(it.get("topic_label") or "unknown_topic")
+        counts[label] = counts.get(label, 0) + 1
+
+    if not counts:
+        return ["- 未归类"]
+
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    lines: List[str] = []
+    for label, n in ordered:
+        display = display_map.get(label) or label
+        if label == "unknown_topic":
+            display = "未归类"
+        suffix = f"（{n} 份）" if n > 1 else ""
+        lines.append(f"- {display}{suffix}")
+    return lines
+
+
 def _render_final_notes_markdown(result: Dict[str, Any]) -> str:
-    """Render a note-first markdown without pipeline diagnostics."""
+    """Render a note-first markdown without pipeline diagnostics.
+
+    Layout rules (why the output looks the way it does):
+    - No "概念：/ 方法：..." prefix: the section header already says it.
+    - No "[heading_path: ...]" tail: that's a classifier-only marker.
+    - Source is annotated only when more than one source contributed.
+    - "重点速记" only surfaces when there are enough notes that a
+      top-N distillation is actually useful; otherwise omitted to avoid
+      "speed recall" being a verbatim copy of every preceding section.
+    """
     topic_output = result.get("topic_classification", {}) or {}
     topic_items = topic_output.get("items", []) or []
-    topic_label = topic_items[0].get("topic_label") if topic_items else "unknown_topic"
+    label_definitions = topic_output.get("label_definitions", []) or []
 
     categorized = result.get("categorized_notes", {}) or {}
     stage3 = (result.get("stage_summaries", {}) or {}).get("stage_3", {}) or {}
-    key_points = (result.get("key_points", {}) or {}).get("key_points", []) or []
+    key_points_raw = (result.get("key_points", {}) or {}).get("key_points", []) or []
+    overview = result.get("overview", {}) or {}
 
-    def _cat_text(cat: str) -> List[str]:
+    # A source appears "multi" only if >1 distinct source_name contributed
+    # note content. We key off the topic items (document-level records)
+    # because they are guaranteed to cover each ingested source exactly once.
+    source_names = {
+        str(it.get("source_name") or "") for it in topic_items if it.get("source_name")
+    }
+    multi_source = len(source_names) > 1
+
+    def _cat_rows(cat: str) -> List[Tuple[str, str]]:
         rows = categorized.get(cat, []) or []
-        out: List[str] = []
+        out: List[Tuple[str, str]] = []
         for r in rows:
-            t = (r.get("chunk_text") or "").strip()
-            if t:
-                out.append(t)
+            text = _clean_note_text(r.get("chunk_text") or "")
+            if not text:
+                continue
+            src = str(r.get("source_name") or "")
+            out.append((text, src))
         return out
 
-    lines: List[str] = [
-        "# 整理笔记",
-        "",
-        "## 主题",
-        f"- {topic_label}",
-        "",
-        "## 核心概念",
-    ]
-    concepts = _cat_text("basic_concepts")
-    if concepts:
-        lines.extend([f"- {x}" for x in concepts])
-    else:
-        lines.append("- （无）")
+    def _fallback_rows(stage3_key: str) -> List[Tuple[str, str]]:
+        items = stage3.get(stage3_key, []) or []
+        return [(_clean_note_text(t), "") for t in items if _clean_note_text(t)]
 
-    lines += ["", "## 方法步骤"]
-    methods = _cat_text("methods_and_processes")
-    if methods:
-        lines.extend([f"- {x}" for x in methods])
-    else:
-        lines.append("- （无）")
-
-    lines += ["", "## 例子与应用"]
-    examples = _cat_text("examples_and_applications")
-    if examples:
-        lines.extend([f"- {x}" for x in examples])
-    else:
-        lines.append("- （无）")
-
-    lines += ["", "## 易错点"]
-    pitfalls = _cat_text("difficult_or_error_prone_points")
-    if pitfalls:
-        lines.extend([f"- {x}" for x in pitfalls])
-    else:
-        lines.append("- （无）")
-
-    lines += ["", "## 延伸阅读"]
-    reading = _cat_text("extended_reading")
-    if reading:
-        lines.extend([f"- {x}" for x in reading])
-    else:
-        next_reading = stage3.get("next_reading_directions", []) or []
-        if next_reading:
-            lines.extend([f"- {x}" for x in next_reading])
-        else:
+    def _emit(header: str, rows: List[Tuple[str, str]]) -> None:
+        lines.append("")
+        lines.append(header)
+        if not rows:
             lines.append("- （无）")
+            return
+        for text, source in rows:
+            if multi_source and source:
+                lines.append(f"- {text} *（来源：{source}）*")
+            else:
+                lines.append(f"- {text}")
 
-    lines += ["", "## 重点速记"]
-    if key_points:
-        lines.extend([f"- {x}" for x in key_points])
-    else:
-        lines.append("- （无）")
+    concepts = _cat_rows("basic_concepts")
+    methods = _cat_rows("methods_and_processes")
+    examples = _cat_rows("examples_and_applications")
+    pitfalls = _cat_rows("difficult_or_error_prone_points")
+    reading = _cat_rows("extended_reading") or _fallback_rows("next_reading_directions")
+
+    lines: List[str] = ["# 整理笔记"]
+
+    # --- Overview (only when multi-source, otherwise skip to reduce clutter) ---
+    if multi_source:
+        lines.append("")
+        lines.append(
+            f"> 本笔记由 {len(source_names)} 份文档合并整理而成："
+            + "、".join(sorted(source_names))
+        )
+
+    # --- Topic ---
+    lines += ["", "## 主题"]
+    lines.extend(_format_topic_summary(topic_items, label_definitions))
+
+    _emit("## 核心概念", concepts)
+    _emit("## 方法步骤", methods)
+    _emit("## 例子与应用", examples)
+    _emit("## 易错点", pitfalls)
+    _emit("## 延伸阅读", reading)
+
+    # --- Key-point distillation ---
+    # Only surface "重点速记" when the main sections are rich enough for
+    # distillation to add information. Otherwise it's a verbatim echo.
+    total_main = len(concepts) + len(methods) + len(examples) + len(pitfalls) + len(reading)
+    if total_main > 12 and key_points_raw:
+        def _norm(s: str) -> str:
+            return " ".join(_clean_note_text(s).split()).lower()
+        shown = {_norm(text) for text, _ in concepts + methods + examples + pitfalls + reading}
+        distilled: List[str] = []
+        for p in key_points_raw:
+            clean = _clean_note_text(p)
+            if not clean:
+                continue
+            if _norm(clean) in shown:
+                continue
+            distilled.append(clean)
+        if distilled:
+            lines += ["", "## 重点速记"]
+            lines.extend([f"- {x}" for x in distilled[:6]])
+
+    # --- Footer with minimal provenance ---
+    lines += [
+        "",
+        "---",
+        f"*共整理 {total_main} 条笔记，来自 {overview.get('source_count', 0)} 份文档。*",
+    ]
 
     return "\n".join(lines).strip() + "\n"
 
