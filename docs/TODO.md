@@ -35,3 +35,17 @@
 - [x] ~~增加配置文件（阈值、分块长度、分类关键词、LABEL_HINTS、OCR 语言）~~（2026-04-20：`config/pipeline_config.json` + `tools/runtime_config.py`）
 - [x] ~~Markdown 导出支持分级目录折叠，提高长笔记可读性~~（2026-04-20：`markdown_use_details`）
 - [x] ~~打包 Docker 镜像（内置 tesseract + 中文语言包），让 OCR 从 opt-in 变"开箱即用"~~（2026-04-20：`Dockerfile`）
+
+## P1+（UI 交付链，本轮响应式补齐，非事前登记）
+
+- [x] ~~提供最简本地 Web UI（stdlib 实现）：文件上传、API 设置、结果展示~~（2026-04-20：`service/simple_ui.py`）
+- [x] ~~清洗最终笔记 Markdown 排版（去前缀冠词与 heading_path 噪声、多源来源标注、自适应"重点速记"）~~（2026-04-20：`_render_final_notes_markdown` 与 `export_word` 的 Quote/italic/HR 支持）
+- [x] ~~UI 已上传文件池 + 上传安全限额（图片 10 / 总数 20 / 单文件 20MB / 请求体 200MB）~~（2026-04-20：`service/simple_ui.py` 常量 + `_store_uploaded_files` 校验）
+- [x] ~~UI 文件池类型/计数汇总 + 输出目录透明化（以项目根为基准解析，实时显示"本次将写入"的绝对路径）~~（2026-04-20）
+
+## P1+（安全 / 合规，本轮响应式补齐）
+
+- [x] ~~`/settings` 不再把 API key 明文回渲染进 HTML（改为 masked 状态 + `type=password`）~~（2026-04-20）
+- [x] ~~`/download` 严格白名单（仅 `outputs/` 根目录，正则 + relative_to 双层校验）~~（2026-04-20）
+- [x] ~~`cgi` 模块被 Python 3.13 移除的提前规避（自写 `_parse_multipart`）~~（2026-04-20）
+- [x] ~~`collect_input_files` 修复：显式文件路径即使位于 EXCLUDED_DIR_NAMES（如 `uploads/`）也应被接受~~（2026-04-20）

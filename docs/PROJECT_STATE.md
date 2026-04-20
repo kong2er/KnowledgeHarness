@@ -26,7 +26,6 @@ KnowledgeHarness/
 │   ├── ACCEPTANCE.md
 │   ├── API_SETUP.md
 │   ├── ARCHITECTURE.md
-│   ├── API_SETUP.md
 │   ├── HANDOFF.md
 │   ├── PROJECT_STATE.md
 │   └── TODO.md
@@ -42,10 +41,11 @@ KnowledgeHarness/
 │   ├── stage_summarize.py
 │   ├── extract_keypoints.py
 │   ├── validate_result.py
-│   └── export_notes.py
+│   ├── export_notes.py
+│   └── export_word.py
 ├── service/
 │   ├── api_server.py                # minimal FastAPI service entry
-│   └── simple_ui.py                 # minimal local web inspection UI (stdlib)
+│   └── simple_ui.py                 # local Web UI (stdlib; no 3rd-party framework)
 ├── tests/
 │   ├── __init__.py
 │   ├── test_parse_inputs.py         # stdlib-only; runs via `python3 tests/...`
@@ -59,6 +59,8 @@ KnowledgeHarness/
 │   ├── ingest_demo.docx             # docx happy path
 │   ├── ingest_demo.png               # image; triggers OCR or degrade
 │   └── unsupported_demo.log          # unsupported_file_type path
+├── uploads/                          # gitignored; UI upload pool
+│   └── ui_uploads/
 ├── outputs/                          # gitignored; run artifacts only
 │   ├── result.json
 │   └── result.md
@@ -134,19 +136,17 @@ KnowledgeHarness/
 
 - `tools/export_notes.py`
   - `result.json` + `result.md`
-  - 默认导出“最终整理笔记版” `result.md`（流程诊断保留在 `result.json`）
-  - md 完整渲染 Stage 1（theme distribution）+ Stage 2（每类 count+preview）+ Stage 3（四个子列表）
-  - `Failed Sources` 列出带 `reason` 的失败项
-  - 新增 `Ingestion Summary` 小节（仅在存在 ingestion_summary 时显示）
-  - 新增 `Topic Overview` 小节（topic counts + per-source label）
-  - 新增 `Semantic Conflicts` 小节（当存在冲突时）
-  - 支持 `markdown_use_details`（分类区块可折叠）
+  - 默认导出"最终整理笔记版"（`final_notes_only=True`）：去除 classifier-facing 冠词前缀（"概念：/方法步骤：..."）与 `[heading_path: …]` 尾巴；多源时自动在顶部加 `> 本笔记由 N 份文档合并整理` 引用 + 每条带 `*（来源：xxx）*` 斜体标注；总条数 >12 且有去重新增时才输出"重点速记"节，避免重复
+  - "完整报告版"（`final_notes_only=False`）保留诊断信息：完整渲染 Stage 1（theme distribution）+ Stage 2（每类 count+preview）+ Stage 3（四个子列表）、`Ingestion Summary`、`Topic Overview`、`Semantic Conflicts`、`Failed Sources`（带 `reason`）
+  - 支持 `markdown_use_details`（分类区块可折叠渲染）
   - `review_needed` 与 `pipeline_notes` 分区呈现
   - `failed_sources` / `empty_extracted_sources` 仅在非空时显示
 
 - `tools/export_word.py`
-  - 从 `result.md` 生成基础 `result.docx`（可选）
-  - `python-docx` 依赖异常时降级，不中断主流程（记录 pipeline_notes）
+  - 从已生成的 `result.md` 转换为 `result.docx`（`python-docx`，已在 `requirements.txt`）
+  - 支持 ATX 标题 / bullet / 引用块（Word `Quote` 样式，模板缺失时降级 Normal）/ 水平线（`---` → 空段落，不渲染字面量）
+  - 行内 `*…*` 斜体转为真 `run.italic = True`，不残留字面量星号
+  - 失败时不中断主流程；`app.run_pipeline` 会把异常写入 `pipeline_notes`
 
 - `app.py`
   - CLI 串联全流程
@@ -176,10 +176,20 @@ KnowledgeHarness/
   - 通过 `requirements-api.txt` 进行可选依赖安装
 
 - `service/simple_ui.py`
-  - 提供最简本地 Web 检查界面（stdlib `http.server`，无额外依赖）
-  - 支持输入路径、topic/web mode、keypoint 参数并直接触发 `run_pipeline`
-  - 支持上传文件、统一 API 设置页、可选 docx 导出
-  - 页面聚焦展示最终文档输出（`result.md` 内容）与导出路径
+  - 基于 `http.server` 的本地 Web UI，**不依赖 Flask / Jinja / cgi**（cgi 在 Python 3.13 已移除）；多部分解析由本模块内的 `_parse_multipart` 提供
+  - **文件池**（`uploads/ui_uploads/`）：首次上传后的文件被保留并在 UI 内列出，每条带类型 pill + 大小 + mtime + "删除"按钮；勾选即可再次运行，不需要重上传。顶部有"清空全部"、"共 N 个"胶囊、类型分布行（如 `.docx × 2 · .png × 3 · .md × 1`）
+  - **上传限额**（默认常量，位于 `service/simple_ui.py` 顶部可调）：
+    - `MAX_IMAGE_COUNT_PER_RUN = 10`（png/jpg/jpeg 合计）
+    - `MAX_TOTAL_FILES_PER_RUN = 20`（全格式）
+    - `MAX_FILE_SIZE_BYTES = 20 MB`
+    - `MAX_REQUEST_BODY_BYTES = 200 MB`（`Content-Length` 预校验，防 OOM）
+  - **输出目录透明化**：相对路径一律以项目根目录（`ROOT`）为基准解析；UI 实时显示"本次将写入：<abs path>"；若不在 `outputs/` 之下则显示"下载链接不可用，需手动打开路径"警告
+  - **下载端点 `GET /download?name=<basename>`**：严格限制在 `outputs/` 根目录，`name` 白名单正则 + `Path.resolve().relative_to()` 二层校验；任何路径穿越（`../` / 绝对路径 / 子目录）返回 400
+  - **API 设置页 `/settings`**：密钥字段使用 `type=password` 且**从不回显当前值**；状态用"已配置（末 4 位：···abcd）"掩码形式呈现；留空提交 = 保持原值，不会误清空
+  - **进度反馈**：submit 时 inline JS 禁用按钮 + 顶部显示"处理中"状态条
+  - **结果页**：摘要卡（校验 badge / ingestion 统计 / 分类计数 / 每源主题）+ 下载按钮（MD / JSON / DOCX）+ 可滚动的 markdown 预览
+  - 错误分级：`ValueError` → 400（输入错误，如超限、不支持格式、空选）；其他异常 → 500（流水线异常），均保持 UI 存活
+  - 自动加载项目根 `.env`（不覆盖已有系统环境变量）
 
 - `tests/test_parse_inputs.py`
   - 仅覆盖"输入扩展与上传告知"模块的核心路径（不含 pytest 依赖，可直接 `python3` 运行）
@@ -207,26 +217,30 @@ KnowledgeHarness/
 
 ## 3) Not Implemented / Placeholder
 
-- Flask 服务入口未实现（当前仅 FastAPI 最小入口）
+- Flask 服务入口未实现（当前仅 FastAPI 最小入口，标记为可选冗余项）
 - API 接口联调待外部接口规范与鉴权信息就绪
-- 全量 pytest 自动化测试套件未建立；当前为 5 份 stdlib-only 测试脚本（可直接 `python3 tests/<name>.py` 运行）：
+- 全量 pytest 自动化测试套件未建立；当前为 **6 份 stdlib-only 测试脚本**（可直接 `python3 tests/<name>.py` 运行）：
   `test_parse_inputs.py` / `test_stage1_core.py` / `test_topic_coarse_classify.py` /
-  `test_phase2_features.py` / `test_phase3_non_api.py`（合计 70 用例；pypdf 可用时全跑，缺失时最多 SKIP 2 条）
+  `test_phase2_features.py` / `test_phase3_non_api.py` / `test_api_service_entry.py`
+  合计 **70 条用例 + 1 条 FastAPI 入口断言**（fastapi 缺失时最后一条自动 SKIP，pypdf 缺失时 parse_inputs 最多 SKIP 2 条）
+- `service/simple_ui.py` 的 HTTP 层无自动化断言测试，仅在会话内用 curl 做端到端验证；生产级自动化需引入 pytest + httpx 或类似栈
 - 图片 OCR 在默认环境下**不真正执行**（需安装 `requirements-ocr.txt` + `tesseract` 系统二进制）；默认行为是结构化降级，而非"已实现完整 OCR"。容器内（`Dockerfile`）默认可用
 - Topic API 仅提供可选接入点；默认运行不依赖外部 API
 - Web enrichment API 仅提供可选接入点；默认可走 local 模式
 - 语义冲突检测当前为启发式规则版，非 NLI 语义推理
 - 运行时配置当前为 JSON 文件方案；未接入远程配置中心
+- UI 为单用户设计，无会话/鉴权/并发隔离；`uploads/ui_uploads/` 为进程共享池，不做 TTL 清理
 
 ## 4) Known Issues
 
 1. 规则分类依赖关键词字典，未在字典覆盖的表述仍会进 `unclassified`。
 2. `_leading_label` 只识别"短前缀 + 中/英冒号"，纯口语化段落识别率低。
-3. Markdown 导出可读性已显著提升，但未做分级目录折叠，长笔记仍显冗长。
-4. 图片 OCR 的语言包（`chi_sim`）需单独安装，否则会回退到 `eng`；混合中英图片在仅 `eng` 的环境下可能漏字。
-5. topic 粗分类当前以 alias 命中为主；当领域词库覆盖不足时会降级 `unknown_topic`。
-6. web enrichment local 模式只会提取用户资料中已有链接，不会主动联网搜索。
-7. encrypted PDF 降级测试依赖 `pypdf` 可用；依赖缺失时测试会 skip。
+3. 图片 OCR 的语言包（`chi_sim`）需单独安装，否则会回退到 `eng`；混合中英图片在仅 `eng` 的环境下可能漏字。
+4. topic 粗分类当前以 alias 命中为主；当领域词库覆盖不足时会降级 `unknown_topic`。
+5. web enrichment local 模式只会提取用户资料中已有链接，不会主动联网搜索。
+6. encrypted PDF 降级测试依赖 `pypdf` 可用；依赖缺失时测试会 skip。
+7. Word 导出只覆盖 `_render_final_notes_markdown` 实际输出的 markdown 子集（标题 / bullet / 引用 / 斜体 / 水平线）；一般 markdown 语法（表格、代码块、链接文本）未处理，超出本用途会回退为纯文本段落。
+8. UI 下载端点只对 `outputs/` 根目录生效；`outputs/` 子目录 或非 `outputs/` 的绝对路径需手动打开文件系统路径（UI 会给出明确提示）。
 
 ## 5) Acceptance Gate
 

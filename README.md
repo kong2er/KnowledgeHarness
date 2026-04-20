@@ -148,14 +148,20 @@ pip install -r requirements-api.txt
 uvicorn service.api_server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-8. 启动最简本地检查 UI（可选，无额外依赖）：
+8. 启动最简本地 Web UI（可选，**零第三方依赖**）：
 
 ```bash
 python3 service/simple_ui.py --host 127.0.0.1 --port 8765
 # 浏览器打开 http://127.0.0.1:8765
-# 在页面点击“API 设置”可单独配置并保存 API 到 .env
-# 在页面勾选“同时导出 Word（.docx）”可额外生成 result.docx
 ```
+
+UI 功能一览：
+- **文件上传** + **文件池**：上传的文件保留在 `uploads/ui_uploads/`，页面会列出池内所有文件（含类型 pill / 大小 / 时间），下次运行直接勾选即可，不用重传。单次运行上限：**图片 10 张 / 总数 20 个 / 单文件 20 MB / 整个请求体 200 MB**（常量在 `service/simple_ui.py` 顶部可调）。
+- **输出目录可自设**：相对路径以项目根为基准；UI 实时显示"本次将写入"的绝对路径。当目标不在 `outputs/` 根目录时，下载链接自动退化为纯文本路径并给出警告。
+- **下载端点** `GET /download?name=result.md|result.json|result.docx`：严格限制在 `outputs/` 根目录，路径遍历被双层校验拦截。
+- **API 设置页** `/settings`：只展示 `已配置（末 4 位：···abcd）` 这种 masked 状态，**永不回显密钥原值**；输入框为 `type=password` + `autocomplete=new-password`；留空提交 = 保持原值。
+- **进度反馈**：submit 时禁用按钮并显示"处理中…"状态条，避免用户误以为页面卡住。
+- **错误分级**：400（输入错误：空选 / 超限 / 不支持格式）和 500（流水线异常）都保留 UI 存活，不白屏。
 
 9. Docker 运行（OCR-ready）：
 

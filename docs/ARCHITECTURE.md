@@ -1,5 +1,16 @@
 # ARCHITECTURE
 
+## 交付面板（同一条核心流水线 × 4 种调用方式）
+
+| 交付面 | 入口 | 定位 |
+|--------|------|------|
+| CLI | `app.py` | 权威入口；所有 flag 与配置由此驱动；所有测试与 Docker 都复用它 |
+| FastAPI | `service/api_server.py` (`/pipeline/run` 等) | 可选依赖（`requirements-api.txt`）；薄包装，不分叉核心逻辑 |
+| Local Web UI | `service/simple_ui.py` | 零第三方依赖（stdlib `http.server`）；文件池、上传限额、下载端点、masked API key |
+| Docker | `Dockerfile` | OCR-ready：容器内已装 `tesseract-ocr` + `tesseract-ocr-chi-sim`，同时保留 CLI/API/UI 全部入口 |
+
+所有 4 种入口最终都走 `app.run_pipeline`，所以 CLI 上验收过的行为 = 其他 3 个面的行为。
+
 ## 主流程
 
 ```text
@@ -15,22 +26,34 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   -> detect_semantic_conflicts (heuristic)
   -> validate_result     (consumes failed_sources / empty_sources / web_resources / semantic_conflicts)
   -> assemble result     (review_needed ≠ pipeline_notes)
-  -> export_notes
-  -> outputs/result.json + outputs/result.md
+  -> export_notes        (final_notes_only | full_report)
+  -> [optional] export_word (from rendered result.md)
+  -> outputs/result.json + outputs/result.md [+ result.docx]
 ```
 
 ## 模块关系
 
 - `app.py`
   - 流程编排
-  - 输入收集（文件 / 目录 / glob），默认跳过项目元目录
+  - 输入收集（文件 / 目录 / glob），默认跳过项目元目录（含 `uploads/`）
   - 读取运行时配置（`config/pipeline_config.json`）
+  - 自动加载项目根 `.env`（不覆盖已存在的系统环境变量）
   - 汇总统一 `result`，分离 `review_needed` 与 `pipeline_notes`
+  - `final_notes_only` / `export_docx` 等笔记形态开关
 
 - `service/api_server.py`
   - FastAPI 最小服务入口
   - 暴露 `/health`、`/pipeline/run`、`/pipeline/capabilities`
   - 服务层只做请求封装，不改动核心流水线语义
+
+- `service/simple_ui.py`
+  - 基于 stdlib `http.server` 的本地 Web UI，**零第三方依赖**（不使用已废弃的 `cgi` 模块）
+  - 路由：`GET /`、`GET /settings`、`POST /run`、`POST /settings`、`POST /uploads/clear`、`POST /uploads/remove`、`GET /download?name=…`
+  - 文件池（`uploads/ui_uploads/`）+ 类型 pill + 计数汇总；prev 上传可勾选重跑
+  - 上传四重限额：图片数 / 总数 / 单文件大小 / 请求体大小
+  - `/download` 严格限制在 `<ROOT>/outputs/` 下；双层校验（正则白名单 + `Path.relative_to`）
+  - `/settings` 密钥字段永不回显，只展示 masked 状态（末 4 位）；留空提交=保持原值
+  - 相对输出目录以 `ROOT` 为基准解析，UI 实时显示"本次将写入"的绝对路径
 
 - `tools/parse_inputs.py`
   - 输入标准化为文档对象
@@ -84,11 +107,18 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 
 - `tools/validate_result.py`
   - 对分类与摘要做一致性与完整性校验
-  - 消费 parse 层的 failed/empty 记录
+  - 消费 parse 层的 failed/empty 记录、web enrichment 资源、语义冲突
 
 - `tools/export_notes.py`
   - 序列化为 JSON 与 Markdown
+  - `final_notes_only=True`（默认）：清洗 classifier-facing 噪声（前缀冠词、`[heading_path: …]` 尾巴），多源自动加来源注释，自适应决定是否输出"重点速记"节
+  - `final_notes_only=False`：完整报告版（Stage 1/2/3 + ingestion + topic + conflicts）
   - `review_needed` / `pipeline_notes` / `failed_sources` / `empty_sources` 分区呈现
+
+- `tools/export_word.py`
+  - 从已生成的 `result.md` 转换为 `result.docx`
+  - 覆盖 `_render_final_notes_markdown` 实际输出的子集：headings / bullets / quote / horizontal rule / inline italic
+  - 失败只记 `pipeline_notes`，不中断主流程
 
 ## 数据契约（顶层 result）
 

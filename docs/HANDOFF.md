@@ -1,57 +1,78 @@
 # HANDOFF
 
-Last Updated: 2026-04-20
+Last Updated: 2026-04-20（当日多轮迭代的最终基线）
 
 ## 当前可用交接结论
 
-- MVP 主流程端到端可跑并产出 `result.json` / `result.md`。
-- **本轮交付**（两次叠加，均在本次会话落地）：
-  1. **输入扩展与上传告知模块**（`feat/input-expansion`）：txt/md/pdf/docx 默认可用，图片 opt-in OCR + 显式降级。
-  2. **Topic Coarse Classification Layer**（今天主任务）：document 级粗分类，受本地 `config/topic_taxonomy.json` 约束，支持 `auto/local/api` 三模式，API 越界/失败降级为 local 或 `unknown_topic`；结果挂在 `result.topic_classification`。
-  3. **Phase-2 配套 P1 层**：
-     - `web_enrichment`（开关可控，`off/local/api/auto`；严格输出 `title/url/purpose/relevance_reason`）
-     - `detect_semantic_conflicts`（启发式关键词互斥，非 NLI 语义推理）
-     - `validate_result` 消费两者并产生 `web_resources_missing_url/relevance_reason` / `semantic_conflicts_detected:<n>` 告警
-  4. **Phase-3 运行时与交付增强**：
-     - `runtime_config`：`config/pipeline_config.json` 深度合并默认值，失败降级
-     - `--config` / `--topic-mode` / `--topic-taxonomy` / `--enable-web-enrichment` / `--keypoint-min-confidence` / `--keypoint-max-points` 等 CLI 旋钮
-     - Markdown 折叠导出（`markdown_use_details`）
-     - `Dockerfile` + `.dockerignore`：容器内默认装好 `tesseract-ocr` + `tesseract-ocr-chi-sim`，让 OCR 从 opt-in 变"开箱即用"
-  5. **测试网扩面**：`tests/test_stage1_core.py`、`tests/test_phase2_features.py`、`tests/test_phase3_non_api.py`、`tests/test_topic_coarse_classify.py` 叠加到原先的 `tests/test_parse_inputs.py`，合计 **70 用例全 PASS**（pypdf 可用时，原本 2 条 SKIP 不再出现）。
+- 仓库 `main` 与 `origin/main` 同步至 `2395953`，本地工作树 clean。
+- MVP 主流程端到端可跑并产出 `result.json` / `result.md`（多源时含 `> 本笔记由 N 份文档合并整理` 引用头 + 每条 `*（来源：xxx）*` 斜体标注）。
+- 4 种交付面板（CLI / FastAPI / Web UI / Docker）共享同一个 `app.run_pipeline`，CLI 验收过的行为在其他面上同样成立。
 
-- **本会话期间修正项**（在代码审计后发现的真实问题，这一次会话里已修）：
-  1. `config/topic_taxonomy.json` 中 `software_engineering` 别名 `"测试"` 过宽，会把 ML 文档中的"测试集"误匹配成 SE。已移除孤立 `"测试"`、扩充更明确的 SE 测试词（`unit test` / `集成测试` / `代码评审` / `重构` 等），并新增 `machine_learning` 标签。`samples/demo.md` 现在会正确分到 `machine_learning`（conf 0.9）。
-  2. `docs/PROJECT_STATE.md` §3 与 `docs/ACCEPTANCE.md` §2 关于"当前仅 `tests/test_parse_inputs.py`"的陈述已过期（实为 5 份测试文件），本轮已同步修正。
+## 今日交付的 9 个 commit（从老到新）
 
-- **硬验收线**：
-  - `python3 app.py samples/demo.md --output-dir outputs` → `is_valid=True` / warnings=[]
-  - `python3 app.py samples/ --output-dir outputs`（docx + md + png 混合；若 tesseract 在位则 png 真 OCR） → `is_valid=True`
-  - 5 份测试脚本合计 `70 passed, 0 failed`（pypdf 缺失时最多 SKIP 2 条编码 PDF 用例，主流程不受影响）
+```
+211fd5a  feat: scaffold KnowledgeHarness MVP pipeline
+e6aecb0  docs: solidify project constraints state and session rules
+fd22d96  fix: align MVP pipeline to truth and establish acceptance framework
+bf0dd4f  feat: input expansion + user ingestion notice module
+7600326  feat: topic coarse classifier + companion MVP layers
+9d0827f  feat: FastAPI + local Web UI + Word export (with hard-earned UI fixes)
+3f9a744  refactor(export): clean up final notes layout (md + docx)
+1993ba6  feat(ui): uploaded-file pool + upload safety caps
+2395953  feat(ui): pool type/count breakdown + output-dir transparency
+```
+
+## 已交付能力（按交付顺序而不是类别排列）
+
+1. **输入扩展 & ingestion notice**（bf0dd4f）：txt/md/pdf/docx 默认可用，图片 opt-in OCR + 显式降级；`failed_sources` 带 `reason`；`ingestion_summary` 自报。
+2. **Topic 粗分类层**（7600326）：document 级，本地 taxonomy 约束，`auto/local/api` 三模式，API 越界/失败自动降级；配套 web_enrichment、semantic_conflicts、runtime_config、markdown 折叠、Docker、多个测试脚本。
+3. **FastAPI + Local UI + Word 导出**（9d0827f）：三条新交付面板落地；UI 一次审计后修了安全/可用性两类问题（见下）；内嵌 stdlib 多部分解析器替代已废弃的 `cgi`。
+4. **最终笔记排版清洗**（3f9a744）：`_render_final_notes_markdown` 去冠词前缀与 heading_path 尾巴；多源自动加引用头与来源标注；"重点速记"自适应（≤12 条时省略）；`export_word` 支持斜体、Quote、水平线。
+5. **UI 文件池 + 上传安全限额**（1993ba6）：`uploads/ui_uploads/` 显式成"池"，勾选即可再次运行；新增 `/uploads/clear`、`/uploads/remove`；图片/总数/单文件/请求体四重限额；顺手修了 `collect_input_files` 对 EXCLUDED 路径下显式文件的老 bug。
+6. **UI 类型汇总 + 输出目录透明化**（2395953）：池顶部总数胶囊 + 类型分布（按计数降序）；每行带类型 pill（图片琥珀色区分）；输出目录以 `ROOT` 为基准解析，UI 实时显示"本次将写入"的绝对路径与下载链接可用性警告。
+
+## 硬验收线（已实测）
+
+- `python3 app.py samples/demo.md --output-dir outputs --quiet` → `is_valid=True` / warnings=(none)
+- `python3 app.py samples/demo.md samples/ingest_demo.docx --output-dir /tmp/kh_final_check --quiet` → `is_valid=True`，主题分到 `machine_learning` + `reinforcement_learning`
+- 6 份 stdlib 测试脚本：`70 passed + 1 SKIP`（`test_api_service_entry.py` 在 fastapi 未装时 SKIP，是设计行为）
+- UI 端到端（curl）：池卡片展示、勾选池重跑、/download 白名单、11 张图片超限拒收、21 MB 大文件拒收、/uploads/clear HTTP 303 全部通过
+- 运行时 `result.json` 顶层 11 个必需键齐全：`overview / source_documents / topic_classification / categorized_notes / stage_summaries / key_points / web_resources / semantic_conflicts / review_needed / pipeline_notes / validation`
+
+## 剩余未完成（TODO 明面上只剩 2 条）
+
+- `[ ] 提供 Flask 最小服务入口` — **标记为可选冗余**，FastAPI 已覆盖；如真要做，对应 `service/flask_server.py` 可仿 `api_server.py`。
+- `[ ] API 接口联调` — **阻塞在外部**：代码侧 schema、fallback、越界拒绝、重试、masked 密钥管理全部就位，等你的真实 API URL 与鉴权信息就能接。
 
 ## 建议的下一步（按顺序）
 
-1. **合并上述变更并打 tag**：本次会话把 codex 未提交的成果 + 本人修复合并为一个 commit 推到 `origin/main`。
-2. **topic taxonomy 真实语料演练**：在你自己的真实资料目录上跑一次 `python3 app.py <your_dir> --topic-mode local`，看 `topic_classification.topic_groups` 是否合理；若主题漂移，进一步扩 `config/topic_taxonomy.json` 的 aliases。
-3. **接入 Topic API**（仅当你准备好一个私有可用的 `TOPIC_CLASSIFIER_API_URL`）：代码与 prompt 约束框架已完整，只要服务端按 `allowed_labels` 约束返回即可；否则保持 `local`/`auto` 默认态。
-4. **引入二次整理层**（按领域聚合 → 大类内部笔记生成）：在 topic 层基础上做"粗分类完成 → 每个 topic 下生成子笔记"。这是粗分类为后续准备的下一站，但**不是今天的事**。
-5. **NLI / 向量式语义冲突检测**：当前是关键词互斥启发式，后续可替换为语义推理层，但仍保持"启发式作为快速路径 + 语义模型作为深度路径"的分层。
+1. **在真实资料目录上演练**：`python3 app.py <your_dir> --topic-mode local`，看 `topic_classification.topic_groups` 是否合理。若主题漂移，扩 `config/topic_taxonomy.json` 的 aliases。
+2. **接入 Topic API 或 Web Enrichment API**（需你提供 endpoint）：只要服务端按 `allowed_labels` 或 `required_fields` 约束返回，本地 UI/CLI/FastAPI 三处都自动可用。
+3. **二次整理层**：在 topic 粗分类基础上做"每个 topic 下生成子笔记"，这是粗分类为后续铺的下一站。
+4. **NLI / 向量式语义冲突检测**：当前启发式先用着，后续可加深度路径但保留启发式作为快速筛。
+5. **UI 端 HTTP-层自动化测试**：引入 `httpx`（或 stdlib 的 `http.client`）+ 一个简单的 `tests/test_simple_ui.py`，把本次用 curl 验过的 8 个场景固化成断言。
 
 ## 交接注意事项
 
 - 开发前必须先读：`README.md`、`SKILL.md`、`docs/PROJECT_STATE.md`、`docs/ACCEPTANCE.md`。
 - 文档权威顺序见 `docs/ACCEPTANCE.md` §1；冲突时 `docs/PROJECT_STATE.md` 为事实基线。
-- 不要把占位能力写成已实现；**图片 OCR 必须保留 opt-in + 降级语义**，不能被改成"默认可用"描述；**Topic API 仅为可选协助**，本地约束标签集合是唯一权威。
-- `review_needed` 只承载 chunk 级问题；validation / 系统级警告 / topic 层 warnings / web enrichment warnings / 冲突摘要都必须走 `pipeline_notes`。
-- `samples/demo.md` 的 `validation.is_valid == True` 是硬验收线，变红时必须先修到绿再合入。
-- 任何新扩展需先在 `docs/TODO.md` 登记 → 完成后按 `docs/ACCEPTANCE.md` §2 的 4 步流程同步所有文档 → 验收过 G0–G3 + 对应模块 §4 条目 → 才能标 `[x]`。
+- 不要把占位能力写成已实现；**图片 OCR 必须保留 opt-in + 降级语义**；**Topic API / Web Enrichment API 仅为可选协助**，本地约束是唯一权威。
+- `review_needed` 只承载 chunk 级问题；validation / topic / enrichment / conflict / "no usable input text" 等系统级信号都走 `pipeline_notes`。
+- `samples/demo.md` 的 `validation.is_valid == True` 是硬验收线。
+- UI 安全守则（来自 `docs/ACCEPTANCE.md` §4 `simple_ui.py`）：
+  - 任何 API 密钥值**永远不回显**到 HTML
+  - `/download` 严格白名单在 `outputs/` 根目录
+  - 上传四重限额不得被绕过
 
 ## 本轮交付对依赖栈的影响
 
-| 依赖 | 是否写入 requirements | 安装位置 |
-|------|---------------------|---------|
-| `pypdf>=4.2.0` | `requirements.txt` | pip |
-| `python-docx>=1.1.0` | `requirements.txt` | pip |
-| `pytesseract>=0.3.10` | `requirements-ocr.txt`（opt-in） | pip |
-| `Pillow>=10.0.0` | `requirements-ocr.txt`（opt-in） | pip |
-| `tesseract-ocr` / `tesseract-ocr-chi-sim` 系统二进制 | **不在 pip 管理**，用户自行 `apt-get install`（或直接用 `Dockerfile`） | OS package manager 或容器 |
-| 无新增 Python 依赖 | Topic / Web enrichment / Conflict detection 全部用标准库 (`urllib` / `re` / `json`)，不引入 OpenAI / vector-db 等重量级栈 | — |
+| 依赖 | requirements 文件 | 性质 |
+|------|-------------------|------|
+| `pypdf>=4.2.0` | `requirements.txt` | 核心 |
+| `python-docx>=1.1.0` | `requirements.txt` | 核心（.docx 读入 + .docx 导出共享） |
+| `pytesseract>=0.3.10` | `requirements-ocr.txt` | Opt-in OCR |
+| `Pillow>=10.0.0` | `requirements-ocr.txt` | Opt-in OCR |
+| `tesseract-ocr` + `tesseract-ocr-chi-sim` | **OS package** | Opt-in OCR（或直接用 `Dockerfile`） |
+| `fastapi>=0.111.0` | `requirements-api.txt` | Opt-in API 服务 |
+| `uvicorn>=0.30.0` | `requirements-api.txt` | Opt-in API 服务 |
+| 无新增 | — | Topic / Web enrichment / Conflict / UI / Word export 全部用 stdlib |
