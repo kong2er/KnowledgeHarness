@@ -288,6 +288,50 @@ def _format_size(n: int) -> str:
     return f"{n / (1024 * 1024):.2f} MB"
 
 
+def _resolve_output_dir(raw: str) -> Path:
+    """Resolve a user-supplied output directory string.
+
+    Rules (predictable for testing):
+    - Empty input → `<ROOT>/outputs` (MVP default).
+    - Absolute path → used as-is.
+    - Relative path → resolved against the project root, NOT against the
+      shell CWD where the UI happened to be launched. This matches the
+      "以项目文件所在为基准" expectation.
+    """
+    raw = (raw or "").strip() or "outputs"
+    p = Path(raw)
+    if p.is_absolute():
+        return p
+    return (ROOT / raw).resolve()
+
+
+def _download_support_hint(raw: str) -> str:
+    """Explain in-line whether the browser-download link will work.
+
+    UI's `/download` endpoint only serves files directly inside
+    `<ROOT>/outputs`. Any deeper subdir or any directory outside that
+    whitelist will still run the pipeline (and write files), but those
+    files will only be accessible via the filesystem path shown above.
+    """
+    resolved = _resolve_output_dir(raw)
+    try:
+        rel = resolved.relative_to(OUTPUT_WHITELIST_ROOT)
+    except ValueError:
+        return (
+            '<br/><span class="warn-text">此目录不在 <code>outputs/</code> 之下——'
+            "运行仍会成功，但浏览器下载链接不可用（需手动打开路径）。</span>"
+        )
+    # Under OUTPUT_WHITELIST_ROOT. Only the root itself supports basename
+    # downloads right now; deeper subdirs would require path support in
+    # /download which is intentionally not there.
+    if str(rel) in ("", "."):
+        return ""
+    return (
+        '<br/><span class="warn-text">当前输出是 <code>outputs/</code> 的子目录，'
+        "浏览器下载链接仅对 <code>outputs/</code> 根目录生效。</span>"
+    )
+
+
 def _store_uploaded_files(
     items: List[Tuple[str, str, bytes]],
 ) -> Tuple[List[str], List[str]]:
@@ -514,15 +558,34 @@ def _render_page(
     # --- Pool card ---
     pool_items = _list_uploaded_pool()
     pool_rows_html: List[str] = []
+    # Per-extension counters. Group png/jpg/jpeg as they share OCR semantics
+    # and are jointly capped by MAX_IMAGE_COUNT_PER_RUN.
+    from collections import Counter
+    import time as _time
+    ext_counter: Counter = Counter()
+    for name, _, _ in pool_items:
+        ext = Path(name).suffix.lower().lstrip(".") or "(无后缀)"
+        ext_counter[ext] += 1
+
+    # Build the breakdown line, count-descending then ext-ascending.
+    breakdown_parts: List[str] = []
+    image_total = ext_counter["png"] + ext_counter["jpg"] + ext_counter["jpeg"]
+    for ext, count in sorted(ext_counter.items(), key=lambda kv: (-kv[1], kv[0])):
+        breakdown_parts.append(f".{ext} × {count}")
+    breakdown_line = " · ".join(breakdown_parts)
+
     for name, size, mtime in pool_items:
-        import time as _time
         date_str = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(mtime))
+        ext = Path(name).suffix.lower().lstrip(".") or "(无后缀)"
+        is_image = ext in {"png", "jpg", "jpeg"}
+        pill_class = "type-pill type-img" if is_image else "type-pill"
         escaped = html.escape(name)
         checked = "checked" if name in pool_selected else ""
         pool_rows_html.append(
             "<li class=\"pool-row\">"
             "<label class=\"pool-pick\">"
             f'<input type="checkbox" name="existing_files" value="{escaped}" {checked} form="runForm" />'
+            f'<span class="{pill_class}">{html.escape(ext)}</span>'
             f'<span class="pool-name">{escaped}</span>'
             f'<span class="pool-meta">{_format_size(size)} · {date_str}</span>'
             "</label>"
@@ -532,15 +595,30 @@ def _render_page(
             "</form>"
             "</li>"
         )
+
     if pool_items:
+        image_warn = ""
+        if image_total > MAX_IMAGE_COUNT_PER_RUN:
+            image_warn = (
+                f'<span class="pool-warn">当前池中有 {image_total} 张图片，超过单次处理上限 '
+                f'{MAX_IMAGE_COUNT_PER_RUN} 张——请勾选时只选其中部分</span>'
+            )
+        total_warn = ""
+        if len(pool_items) > MAX_TOTAL_FILES_PER_RUN:
+            total_warn = (
+                f'<span class="pool-warn">池中文件总数 {len(pool_items)} 已超过单次处理上限 '
+                f'{MAX_TOTAL_FILES_PER_RUN} 个</span>'
+            )
         pool_card_html = f"""
         <section class="card">
           <div class="pool-head">
-            <h2 style="margin:0;">已上传文件池</h2>
+            <h2 style="margin:0;">已上传文件池 <span class="pool-count">共 {len(pool_items)} 个</span></h2>
             <form method="post" action="/uploads/clear" class="pool-clear">
               <button type="submit" class="danger-btn">清空全部</button>
             </form>
           </div>
+          <p class="pool-breakdown">类型分布：{html.escape(breakdown_line)}</p>
+          {image_warn}{total_warn}
           <p class="hint">勾选后点"运行流水线"即可再次处理，不需要重新上传。</p>
           <ul class="pool-list">{''.join(pool_rows_html)}</ul>
         </section>
@@ -629,6 +707,30 @@ def _render_page(
     .pool-remove {{ margin: 0; }}
     .link-btn {{ background: transparent; color: #991b1b; border: 0; padding: 2px 6px; font-size: 13px; cursor: pointer; text-decoration: underline; }}
     .danger-btn {{ background: #b91c1c; color: #fff; border: 0; border-radius: 6px; padding: 6px 10px; font-weight: 600; cursor: pointer; font-size: 13px; }}
+    /* ---- file type pill + pool summary + warn ---- */
+    .pool-count {{
+      display: inline-block; margin-left: 8px; padding: 2px 10px;
+      background: #0f766e; color: #fff; border-radius: 999px; font-size: 13px;
+      font-weight: 500;
+    }}
+    .pool-breakdown {{
+      margin: 6px 0; color: #334155; font-size: 13px;
+    }}
+    .pool-warn {{
+      display: block; margin: 4px 0; padding: 6px 10px;
+      background: #fef3c7; color: #92400e; border: 1px solid #fde68a;
+      border-radius: 6px; font-size: 13px;
+    }}
+    .type-pill {{
+      display: inline-block; min-width: 38px; text-align: center;
+      padding: 1px 8px; border-radius: 999px;
+      background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
+      font-size: 11px; font-weight: 600; text-transform: lowercase;
+    }}
+    .type-pill.type-img {{
+      background: #fef3c7; color: #92400e; border-color: #fde68a;
+    }}
+    .warn-text {{ color: #92400e; font-weight: 500; }}
   </style>
   <script>
     document.addEventListener("DOMContentLoaded", function () {{
@@ -672,7 +774,11 @@ def _render_page(
           <div class="row">
             <label for="output_dir">输出目录</label>
             <input id="output_dir" type="text" name="output_dir" value="{html.escape(output_dir)}" />
-            <p class="hint">仅当输出位于 <code>outputs/</code> 之下时，UI 才会提供下载链接；否则只显示绝对路径。</p>
+            <p class="hint">
+              相对路径以项目根目录为基准：<code>{html.escape(str(ROOT))}</code><br/>
+              本次将写入：<code>{html.escape(str(_resolve_output_dir(output_dir)))}</code>
+              {_download_support_hint(output_dir)}
+            </p>
           </div>
           <div class="row">
             <label><input type="checkbox" name="enable_web_enrichment" {_checked(enable_web)} /> 启用 Web 补充</label>
@@ -1080,7 +1186,7 @@ class _Handler(BaseHTTPRequestHandler):
 
             result = run_pipeline(
                 files,
-                output_dir=str(form["output_dir"] or "outputs"),
+                output_dir=str(_resolve_output_dir(str(form.get("output_dir", "")))),
                 topic_mode=str(form["topic_mode"] or "auto"),
                 web_enrichment_enabled=bool(form["enable_web_enrichment"]),
                 web_enrichment_mode=str(form["web_enrichment_mode"] or "auto"),
