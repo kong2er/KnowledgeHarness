@@ -185,6 +185,7 @@ KnowledgeHarness/
   - **输出目录透明化**：相对路径一律以项目根目录（`ROOT`）为基准解析；UI 实时显示"本次将写入：<abs path>"；若不在 `outputs/` 之下则显示"下载链接不可用，需手动打开路径"警告
   - **下载端点 `GET /download?name=<basename>`**：严格限制在 `outputs/` 根目录，`name` 白名单正则 + `Path.resolve().relative_to()` 二层校验；任何路径穿越（`../` / 绝对路径 / 子目录）返回 400
   - **API 设置页 `/settings`**：密钥字段使用 `type=password` 且**从不回显当前值**；状态用"已配置（末 4 位：···abcd）"掩码形式呈现；留空提交 = 保持原值，不会误清空
+  - **多 API 档案管理（2026-04-21）**：支持将当前 API 配置保存为多个档案（`config/api_profiles.json`）、查看档案详情（密钥掩码）、应用（不设默认/设默认）、用当前环境覆盖档案、删除档案，以及一键清空当前 API 环境配置；运行页支持按次选择“API 配置档案”
   - **双视图**：`/` 对外使用视图（默认，隐藏测试/调试信息）与 `/lab` 调试视图（显示测试参数与诊断信息）
   - 调试视图默认禁用：仅 `KH_UI_ENABLE_LAB=1` 时可访问 `/lab`；首页入口还需 `KH_UI_SHOW_LAB_LINK=1`
   - **流程感知 Header（2026-04-21）**：主页标题旁展示 `API 状态` chip，读取 `KNOWLEDGEHARNESS_API_URL` / `TOPIC_CLASSIFIER_API_URL` / `WEB_ENRICHMENT_API_URL` 任一存在即显示"API 已配置"，否则显示"本地模式"；只显示 on/off 状态，**绝不回显任何 URL/Key 值**；点击跳转 `/settings`

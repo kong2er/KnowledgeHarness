@@ -54,6 +54,23 @@ KNOWLEDGEHARNESS_API_KEY=your_token_if_needed
 - `TOPIC_CLASSIFIER_API_TEMPLATE`
 - `WEB_ENRICHMENT_API_TEMPLATE`
 
+## 3.1 UI 多 API 档案（新增）
+
+`/settings` 页面支持：
+
+- 保存“当前 API 环境配置”为档案（可保存多套）
+- 选择某个档案并统一查看详情（URL/模板路径可见，密钥仅掩码显示）
+- 应用某个档案到当前环境（可选：同时设为默认）
+- 用“当前环境配置”覆盖某个已存在档案（用于修改档案）
+- 删除某个档案
+- 一键清空当前全部 API 环境配置
+
+档案存储位置：
+
+- `config/api_profiles.json`
+
+运行时（`/` 或 `/lab`）可在“API 配置档案”下拉框选择本次调用使用的档案；不选择时按当前 `.env` 环境运行。
+
 ## 4. Topic API 请求/响应（基础）
 
 请求（POST JSON）核心字段：

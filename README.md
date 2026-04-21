@@ -18,7 +18,7 @@
 | 摘要 | 三阶段总结（Stage 1/2/3）+ 基于置信度与类别优先级的重点提炼 |
 | 校验 | 未分类比例、重复、阶段缺失、失败源、语义冲突（启发式）、web 资源字段缺失 |
 | 导出 | `result.json` + `result.md`（最终笔记版 / 完整报告版可切换）+ 可选 `result.docx` |
-| 服务层 | FastAPI + Flask 最小入口 + 本地 Web UI（stdlib 零依赖，含文件池、四重上传限额、masked API 设置、路径遍历防御） |
+| 服务层 | FastAPI + Flask 最小入口 + 本地 Web UI（stdlib 零依赖，含文件池、四重上传限额、masked API 设置、多 API 档案选择、路径遍历防御） |
 
 ## 快速开始
 

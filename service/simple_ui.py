@@ -19,6 +19,7 @@ Design constraints (do not regress):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
 import json
 import mimetypes
@@ -37,12 +38,10 @@ if str(ROOT) not in sys.path:
 from app import collect_input_files, run_pipeline
 
 ENV_PATH = Path(".env")
+API_PROFILES_PATH = ROOT / "config" / "api_profiles.json"
 OUTPUT_WHITELIST_ROOT = (ROOT / "outputs").resolve()
+ACTIVE_PROFILE_ENV_KEY = "KNOWLEDGEHARNESS_ACTIVE_API_PROFILE"
 
-# Settings page only exposes the unified "KNOWLEDGEHARNESS_*" keys.
-# Per-module overrides (TOPIC_/WEB_ENRICHMENT_) can still be edited in
-# the .env file manually; they are not in the UI on purpose to keep the
-# settings surface small.
 # Unified API keys shown in the "主设置" section of /settings.
 API_ENV_KEYS = [
     "KNOWLEDGEHARNESS_API_URL",
@@ -60,6 +59,7 @@ MODULE_OVERRIDE_KEYS = [
     ("WEB_ENRICHMENT_API_TEMPLATE", "url", "Web 补充 · 模板文件路径"),
 ]
 ALL_SETTINGS_KEYS = API_ENV_KEYS + [k for k, _, _ in MODULE_OVERRIDE_KEYS]
+PROFILE_ENV_KEYS = list(ALL_SETTINGS_KEYS)
 
 LAB_ENABLED = os.getenv("KH_UI_ENABLE_LAB", "0").strip() == "1"
 SHOW_LAB_LINK = os.getenv("KH_UI_SHOW_LAB_LINK", "0").strip() == "1"
@@ -252,6 +252,93 @@ def _mask_value(value: str) -> str:
     return f"已配置（末 4 位：···{v[-4:]}）"
 
 
+def _sanitize_profile_name(raw: str) -> str:
+    name = (raw or "").strip()
+    # Keep profile names safe/simple for HTML rendering + env hints.
+    return re.sub(r"[\r\n\t]", " ", name)[:64]
+
+
+def _load_api_profiles(path: Path = API_PROFILES_PATH) -> Dict[str, Any]:
+    """Load profile store: {"active_profile": str, "profiles": [{...}], ...}.
+
+    File is optional; malformed content degrades to an empty profile set.
+    """
+    empty: Dict[str, Any] = {"active_profile": "", "profiles": []}
+    if not path.exists() or not path.is_file():
+        return empty
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    raw_profiles = raw.get("profiles")
+    if not isinstance(raw_profiles, list):
+        raw_profiles = []
+    profiles: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_profiles:
+        if not isinstance(item, dict):
+            continue
+        name = _sanitize_profile_name(str(item.get("name", "")))
+        if not name or name in seen:
+            continue
+        cleaned: Dict[str, str] = {"name": name}
+        for k in PROFILE_ENV_KEYS:
+            cleaned[k] = str(item.get(k, "") or "").strip()
+        profiles.append(cleaned)
+        seen.add(name)
+    active = _sanitize_profile_name(str(raw.get("active_profile", "") or ""))
+    if active not in seen:
+        active = ""
+    return {"active_profile": active, "profiles": profiles}
+
+
+def _save_api_profiles(payload: Dict[str, Any], path: Path = API_PROFILES_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _profile_names(payload: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for p in payload.get("profiles", []) or []:
+        name = _sanitize_profile_name(str(p.get("name", "")))
+        if name:
+            out.append(name)
+    return out
+
+
+def _profile_by_name(payload: Dict[str, Any], name: str) -> Dict[str, str] | None:
+    target = _sanitize_profile_name(name)
+    if not target:
+        return None
+    for p in payload.get("profiles", []) or []:
+        if _sanitize_profile_name(str(p.get("name", ""))) == target:
+            return p
+    return None
+
+
+def _profile_updates(profile: Dict[str, Any]) -> Dict[str, str]:
+    return {k: str(profile.get(k, "") or "").strip() for k in PROFILE_ENV_KEYS}
+
+
+@contextlib.contextmanager
+def _temporary_profile_env(profile: Dict[str, Any]) -> Any:
+    """Apply a profile to process env for one pipeline run, then restore."""
+    snapshot = {k: os.getenv(k, "") for k in PROFILE_ENV_KEYS}
+    try:
+        values = _profile_updates(profile)
+        for k, v in values.items():
+            os.environ[k] = v
+        yield
+    finally:
+        for k, old in snapshot.items():
+            os.environ[k] = old
+
+
 def _api_status_chip() -> str:
     """Return an HTML chip describing whether any API URL is configured.
 
@@ -262,10 +349,13 @@ def _api_status_chip() -> str:
     unified = bool(os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip())
     topic = bool(os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip())
     web = bool(os.getenv("WEB_ENRICHMENT_API_URL", "").strip())
+    active_profile = os.getenv(ACTIVE_PROFILE_ENV_KEY, "").strip()
     if unified or topic or web:
         label = "API 已配置"
         tone = "api-chip on"
         hint = "点击调整密钥与按模块覆盖"
+        if active_profile:
+            hint += f"（当前档案：{active_profile}）"
     else:
         label = "本地模式"
         tone = "api-chip off"
@@ -592,6 +682,16 @@ def _render_page(
     kp_min = str(form.get("keypoint_min_confidence", "0.0"))
     kp_max = str(form.get("keypoint_max_points", "12"))
     export_docx = bool(form.get("export_docx", False))
+    profiles_payload = _load_api_profiles()
+    profile_names = _profile_names(profiles_payload)
+    default_profile = (
+        str(form.get("api_profile", "")).strip()
+        or os.getenv(ACTIVE_PROFILE_ENV_KEY, "").strip()
+        or str(profiles_payload.get("active_profile", "")).strip()
+    )
+    if default_profile not in profile_names:
+        default_profile = ""
+    api_profile = default_profile
     uploaded_files = uploaded_files or []
     pool_selected = pool_selected or set()
 
@@ -749,7 +849,27 @@ def _render_page(
     )
     submit_button_label = "运行流水线" if lab_mode else "生成笔记"
 
+    profile_select_html = ""
+    if profile_names:
+        options = [
+            '<option value="">使用当前环境（不指定档案）</option>',
+        ]
+        for name in profile_names:
+            options.append(
+                f'<option value="{html.escape(name)}" {_selected(api_profile, name)}>{html.escape(name)}</option>'
+            )
+        profile_select_html = f"""
+          <div class="row">
+            <label for="api_profile">API 配置档案</label>
+            <select id="api_profile" name="api_profile">
+              {''.join(options)}
+            </select>
+            <p class="hint">可在“API 设置”页新增/删除多个档案，并在此选择本次调用使用的档案。</p>
+          </div>
+        """
+
     prod_controls_html = """
+          {profile_select_html}
           <div class="row">
             <label><input type="checkbox" name="export_docx" {docx_checked} /> 同时导出 Word（.docx）</label>
           </div>
@@ -757,9 +877,13 @@ def _render_page(
           <input type="hidden" name="web_enrichment_mode" value="auto" />
           <input type="hidden" name="keypoint_min_confidence" value="0.0" />
           <input type="hidden" name="keypoint_max_points" value="12" />
-    """.format(docx_checked=_checked(export_docx))
+    """.format(
+        docx_checked=_checked(export_docx),
+        profile_select_html=profile_select_html,
+    )
 
     lab_controls_html = f"""
+          {profile_select_html}
           <div class="row">
             <label><input type="checkbox" name="enable_web_enrichment" {_checked(enable_web)} /> 启用 Web 补充</label>
             <label><input type="checkbox" name="export_docx" {_checked(export_docx)} /> 同时导出 Word（.docx）</label>
@@ -1174,19 +1298,31 @@ def _render_page(
 </html>"""
 
 
-def _render_settings_page(error: str = "", success: str = "") -> str:
+def _render_settings_page(
+    error: str = "",
+    success: str = "",
+    selected_profile_name: str = "",
+) -> str:
     """Settings page that never echoes API values back into the DOM.
 
     Structure:
-    - "主设置" — the unified KNOWLEDGEHARNESS_* pair; recommended for
-      most users.
-    - "按模块覆盖" (collapsed by default) — per-module URL/KEY/TEMPLATE
-      for Topic Classifier and Web Enrichment. These override the
-      unified key at runtime when set.
-    - Every field pairs an input with a "清空此字段" checkbox so the user
-      can remove a secret without hand-editing `.env`.
+    - 主设置 + 模块覆盖（写入 .env）
+    - API 档案管理（保存多个 API 配置、应用、删除）
+    - 显式“清空全部 API 环境配置”动作（无需手工编辑 .env）
     """
     envs = _read_env_pairs()
+    profiles_payload = _load_api_profiles()
+    names = _profile_names(profiles_payload)
+    active_profile = (
+        os.getenv(ACTIVE_PROFILE_ENV_KEY, "").strip()
+        or str(profiles_payload.get("active_profile", "")).strip()
+    )
+    if active_profile not in names:
+        active_profile = ""
+    selected_profile_name = _sanitize_profile_name(selected_profile_name) or active_profile
+    if selected_profile_name not in names:
+        selected_profile_name = ""
+    selected_profile = _profile_by_name(profiles_payload, selected_profile_name) if selected_profile_name else None
 
     def _status(key: str) -> str:
         current = envs.get(key) or os.getenv(key) or ""
@@ -1225,6 +1361,47 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
         _render_field(k, kind, label)
         for k, kind, label in MODULE_OVERRIDE_KEYS
     )
+    options = "".join(
+        f'<option value="{html.escape(n)}" {_selected(selected_profile_name, n)}>{html.escape(n)}</option>'
+        for n in names
+    ) or '<option value="">（暂无可选档案）</option>'
+    profiles_html = "".join(
+        "<tr>"
+        f"<td>{html.escape(n)}</td>"
+        f"<td>{'是' if n == active_profile else '否'}</td>"
+        "</tr>"
+        for n in names
+    )
+    if not profiles_html:
+        profiles_html = '<tr><td colspan="2">（暂无档案）</td></tr>'
+
+    def _detail_value(key: str, value: str) -> str:
+        raw = (value or "").strip()
+        if key.endswith("_KEY"):
+            return html.escape(_mask_value(raw))
+        if not raw:
+            return "（未配置）"
+        return html.escape(raw)
+
+    profile_detail_rows = ""
+    if selected_profile is not None:
+        rows = []
+        for k in PROFILE_ENV_KEYS:
+            rows.append(
+                "<tr>"
+                f"<td><code>{html.escape(k)}</code></td>"
+                f"<td>{_detail_value(k, str(selected_profile.get(k, '') or ''))}</td>"
+                "</tr>"
+            )
+        profile_detail_rows = "".join(rows)
+    else:
+        profile_detail_rows = '<tr><td colspan="2">请选择一个档案后点击“查看档案详情”。</td></tr>'
+
+    unified_url = (envs.get("KNOWLEDGEHARNESS_API_URL") or os.getenv("KNOWLEDGEHARNESS_API_URL", "")).strip()
+    topic_url = (envs.get("TOPIC_CLASSIFIER_API_URL") or os.getenv("TOPIC_CLASSIFIER_API_URL", "")).strip()
+    web_url = (envs.get("WEB_ENRICHMENT_API_URL") or os.getenv("WEB_ENRICHMENT_API_URL", "")).strip()
+    configured_modules = int(bool(topic_url or unified_url)) + int(bool(web_url or unified_url))
+    status_label = "Ready" if configured_modules == 2 else ("Partial" if configured_modules else "Incomplete")
 
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     success_html = f'<div class="ok">{html.escape(success)}</div>' if success else ""
@@ -1255,7 +1432,7 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
       font-size: 14.5px; line-height: 1.55;
       -webkit-font-smoothing: antialiased;
     }}
-    .wrap {{ max-width: 680px; margin: 0 auto; }}
+    .wrap {{ max-width: 760px; margin: 0 auto; }}
     .app-header h1 {{ margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }}
     .app-header .subtitle {{ margin: 6px 0 0 0; color: var(--text-muted); font-size: 13.5px; }}
     .app-header {{ margin-bottom: 20px; }}
@@ -1332,23 +1509,75 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
       text-transform: uppercase; letter-spacing: 0.06em;
       margin: 0 0 10px 0;
     }}
+    .overview-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    .ov-item {{
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface-2);
+      padding: 10px 12px;
+    }}
+    .ov-item .k {{ font-size: 12px; color: var(--text-muted); }}
+    .ov-item .v {{ margin-top: 4px; font-size: 13px; font-weight: 600; color: var(--text); }}
+    .status-ready {{ color: #047857; }}
+    .status-partial {{ color: #b45309; }}
+    .status-incomplete {{ color: #b91c1c; }}
+    .mini-table {{
+      width: 100%; border-collapse: collapse; margin-top: 10px;
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      overflow: hidden;
+    }}
+    .mini-table th, .mini-table td {{
+      border-bottom: 1px solid var(--border-soft); padding: 8px 10px;
+      text-align: left; font-size: 13px;
+    }}
+    .mini-table th {{ background: var(--surface-2); color: var(--text-muted); font-weight: 600; }}
+    .inline-actions {{
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    }}
+    .danger-solid {{
+      background: #b91c1c; color: #fff; border: 0;
+    }}
+    .danger-solid:hover {{ background: #991b1b; }}
+    .ghost-btn {{
+      background: var(--surface); color: var(--text);
+      border: 1px solid var(--border);
+    }}
+    .ghost-btn:hover {{ background: var(--accent-soft); }}
+    @media (max-width: 720px) {{
+      .overview-grid {{ grid-template-columns: 1fr 1fr; }}
+      .inline-actions {{ flex-direction: column; align-items: stretch; }}
+    }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <header class="app-header">
       <h1>API 设置</h1>
-      <p class="subtitle">密钥写入项目根 <code>.env</code>。默认只用"主设置"里的统一 API；进阶需求请展开"按模块覆盖"。</p>
+      <p class="subtitle">工程化配置流程：先看状态，再改配置，再应用档案，最后在危险区执行治理操作。</p>
     </header>
+    <section class="card">
+      <h2>状态概览</h2>
+      <div class="overview-grid">
+        <div class="ov-item"><div class="k">当前激活档案</div><div class="v">{html.escape(active_profile or "未指定")}</div></div>
+        <div class="ov-item"><div class="k">已保存档案数</div><div class="v">{len(names)}</div></div>
+        <div class="ov-item"><div class="k">模块配置完成数</div><div class="v">{configured_modules}/2</div></div>
+        <div class="ov-item"><div class="k">环境状态</div><div class="v {'status-ready' if status_label == 'Ready' else ('status-partial' if status_label == 'Partial' else 'status-incomplete')}">{status_label}</div></div>
+      </div>
+    </section>
     <section class="card">
       {error_html}
       {success_html}
       <form method="post" action="/settings" autocomplete="off">
-        <p class="section-title">主设置（默认所有模块共用）</p>
+        <input type="hidden" name="action" value="save_env" />
+        <p class="section-title">基础配置（主流程）</p>
         {unified_section}
 
         <details>
-          <summary>按模块覆盖（可选；留空即回退到主设置）</summary>
+          <summary>高级配置（按模块覆盖，可选）</summary>
           <p class="hint" style="margin-bottom: 12px;">
             下列环境变量优先于主设置。未填时，Topic 分类与 Web 补充都会自动回退到
             <code>KNOWLEDGEHARNESS_*</code>。
@@ -1357,10 +1586,74 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
         </details>
 
         <div style="margin-top: 18px;">
-          <button type="submit">保存</button>
+          <button type="submit">保存当前环境配置</button>
           <a class="back" href="/">返回</a>
         </div>
       </form>
+    </section>
+    <section class="card">
+      <h2>API 档案管理</h2>
+      <p class="hint">
+        档案用于保存多套 API 地址/密钥。请先选择一个档案，详情会在下方统一展示。
+      </p>
+      <form method="post" action="/settings" autocomplete="off" style="margin-top: 12px;">
+        <input type="hidden" name="action" value="save_profile_current" />
+        <div class="row">
+          <label for="profile_name">新档案名称</label>
+          <input id="profile_name" type="text" name="profile_name" placeholder="例如：主线路 API / 备用 API" />
+          <p class="hint">保存的是“当前 .env 里已配置的 API 字段”；同名会覆盖。</p>
+        </div>
+        <div class="row">
+          <label class="clear-box">
+            <input type="checkbox" name="set_active_on_save" checked />
+            <span>保存后设为默认档案</span>
+          </label>
+        </div>
+        <button type="submit">保存当前配置为档案</button>
+      </form>
+
+      <form method="post" action="/settings" autocomplete="off" style="margin-top: 14px;">
+        <input type="hidden" name="action" value="select_profile" />
+        <div class="row">
+          <label for="selected_profile_name">选择现有档案</label>
+          <select id="selected_profile_name" name="selected_profile_name">
+            {options}
+          </select>
+          <p class="hint">详情显示 URL/模板路径明文，密钥仅掩码显示。</p>
+        </div>
+        <div class="inline-actions">
+          <button type="submit" class="ghost-btn">切换查看</button>
+          <button type="submit" name="action" value="apply_profile">应用到当前环境</button>
+          <label class="clear-box">
+            <input type="checkbox" name="apply_set_default" />
+            <span>同时设为默认档案</span>
+          </label>
+        </div>
+      </form>
+
+      <table class="mini-table">
+        <thead><tr><th>档案名</th><th>当前默认</th></tr></thead>
+        <tbody>{profiles_html}</tbody>
+      </table>
+      <h2 style="margin-top:16px;">选中档案详情</h2>
+      <table class="mini-table">
+        <thead><tr><th>字段</th><th>值</th></tr></thead>
+        <tbody>{profile_detail_rows}</tbody>
+      </table>
+      <details style="margin-top: 14px;">
+        <summary style="color: #b91c1c; font-weight: 600;">危险操作区（谨慎）</summary>
+        <p class="hint" style="margin-bottom: 12px;">
+          以下操作不可撤销：覆盖档案、删除档案、清空全部 API 配置。请先确认已选中正确档案。
+        </p>
+        <form method="post" action="/settings" autocomplete="off">
+          <input type="hidden" name="selected_profile_name" value="{html.escape(selected_profile_name)}" />
+          <div class="inline-actions">
+            <button type="submit" name="action" value="overwrite_profile_from_env" class="danger-solid">用当前环境覆盖该档案</button>
+            <button type="submit" name="action" value="delete_profile" class="danger-solid">删除该档案</button>
+            <button type="submit" name="action" value="clear_all_api_env" class="danger-solid">清空当前全部 API 配置</button>
+          </div>
+        </form>
+      </details>
     </section>
   </div>
 </body>
@@ -1459,29 +1752,143 @@ class _Handler(BaseHTTPRequestHandler):
             payload = self.rfile.read(length).decode("utf-8", errors="replace")
             form_raw = parse_qs(payload, keep_blank_values=True)
             try:
-                updates = {
-                    k: (form_raw.get(k) or [""])[0].strip()
-                    for k in ALL_SETTINGS_KEYS
-                }
-                clears = {
-                    k for k in ALL_SETTINGS_KEYS
-                    if (form_raw.get(f"{k}__clear") or [""])[0]
-                }
-                touched, cleared = _write_env_pairs(updates, clears=clears)
-                parts: List[str] = []
-                if touched:
-                    parts.append(f"更新了 {', '.join(touched)}")
-                if cleared:
-                    parts.append(f"已清空 {', '.join(cleared)}")
-                msg = (
-                    "保存成功：" + "；".join(parts)
-                    if parts
-                    else "未更改任何字段（所有字段留空且无清空请求视为保持原值）"
+                action = (form_raw.get("action") or ["save_env"])[0].strip() or "save_env"
+                selected_profile_name = _sanitize_profile_name(
+                    (form_raw.get("selected_profile_name") or [""])[0]
                 )
-                self._write_html(_render_settings_page(success=msg))
+
+                def _apply_profile_env(profile_name: str, set_default: bool) -> tuple[int, int]:
+                    data = _load_api_profiles()
+                    profile = _profile_by_name(data, profile_name)
+                    if profile is None:
+                        raise ValueError(f"未找到档案：{profile_name}")
+                    updates = _profile_updates(profile)
+                    clears = {k for k, v in updates.items() if not v}
+                    touched, cleared = _write_env_pairs(updates, clears=clears)
+                    if set_default:
+                        data["active_profile"] = profile_name
+                        _save_api_profiles(data)
+                        _write_env_pairs({ACTIVE_PROFILE_ENV_KEY: profile_name})
+                    return len(touched), len(cleared)
+
+                if action == "save_env":
+                    updates = {
+                        k: (form_raw.get(k) or [""])[0].strip()
+                        for k in ALL_SETTINGS_KEYS
+                    }
+                    clears = {
+                        k for k in ALL_SETTINGS_KEYS
+                        if (form_raw.get(f"{k}__clear") or [""])[0]
+                    }
+                    touched, cleared = _write_env_pairs(updates, clears=clears)
+                    parts: List[str] = []
+                    if touched:
+                        parts.append(f"更新了 {', '.join(touched)}")
+                    if cleared:
+                        parts.append(f"已清空 {', '.join(cleared)}")
+                    msg = (
+                        "保存成功：" + "；".join(parts)
+                        if parts
+                        else "未更改任何字段（所有字段留空且无清空请求视为保持原值）"
+                    )
+                elif action == "clear_all_api_env":
+                    _, cleared = _write_env_pairs(
+                        {},
+                        clears=set(PROFILE_ENV_KEYS) | {ACTIVE_PROFILE_ENV_KEY},
+                    )
+                    msg = (
+                        "已清空当前全部 API 环境配置"
+                        if cleared else
+                        "未检测到可清空的 API 环境配置"
+                    )
+                elif action == "save_profile_current":
+                    profile_name = _sanitize_profile_name(
+                        (form_raw.get("profile_name") or [""])[0]
+                    )
+                    if not profile_name:
+                        raise ValueError("请先填写档案名称")
+                    current_env = _read_env_pairs()
+                    profile: Dict[str, str] = {"name": profile_name}
+                    for k in PROFILE_ENV_KEYS:
+                        profile[k] = (current_env.get(k) or os.getenv(k, "")).strip()
+                    if not any(profile.get(k) for k in PROFILE_ENV_KEYS):
+                        raise ValueError("当前没有可保存的 API 配置，请先在上方填写并保存")
+
+                    data = _load_api_profiles()
+                    existing = _profile_by_name(data, profile_name)
+                    if existing is None:
+                        data["profiles"] = (data.get("profiles") or []) + [profile]
+                    else:
+                        for i, item in enumerate(data.get("profiles") or []):
+                            if _sanitize_profile_name(str(item.get("name", ""))) == profile_name:
+                                data["profiles"][i] = profile
+                                break
+                    set_active = bool((form_raw.get("set_active_on_save") or [""])[0])
+                    if set_active:
+                        data["active_profile"] = profile_name
+                        _write_env_pairs({ACTIVE_PROFILE_ENV_KEY: profile_name})
+                    _save_api_profiles(data)
+                    msg = f"已保存 API 档案：{profile_name}" + ("（已设为默认）" if set_active else "")
+                    selected_profile_name = profile_name
+                elif action == "select_profile":
+                    if not selected_profile_name:
+                        raise ValueError("请先选择一个 API 档案")
+                    data = _load_api_profiles()
+                    if _profile_by_name(data, selected_profile_name) is None:
+                        raise ValueError(f"未找到档案：{selected_profile_name}")
+                    msg = f"已加载档案详情：{selected_profile_name}"
+                elif action == "apply_profile":
+                    if not selected_profile_name:
+                        raise ValueError("请先选择一个 API 档案")
+                    set_default = bool((form_raw.get("apply_set_default") or [""])[0])
+                    t_count, c_count = _apply_profile_env(selected_profile_name, set_default=set_default)
+                    msg = (
+                        f"已应用 API 档案：{selected_profile_name}"
+                        f"（更新 {t_count} 项，清空 {c_count} 项）"
+                        + ("；并已设为默认" if set_default else "")
+                    )
+                elif action == "overwrite_profile_from_env":
+                    if not selected_profile_name:
+                        raise ValueError("请先选择要覆盖的档案")
+                    data = _load_api_profiles()
+                    profile = _profile_by_name(data, selected_profile_name)
+                    if profile is None:
+                        raise ValueError(f"未找到档案：{selected_profile_name}")
+                    current_env = _read_env_pairs()
+                    updated: Dict[str, str] = {"name": selected_profile_name}
+                    for k in PROFILE_ENV_KEYS:
+                        updated[k] = (current_env.get(k) or os.getenv(k, "")).strip()
+                    for i, item in enumerate(data.get("profiles") or []):
+                        if _sanitize_profile_name(str(item.get("name", ""))) == selected_profile_name:
+                            data["profiles"][i] = updated
+                            break
+                    _save_api_profiles(data)
+                    msg = f"已用当前环境覆盖档案：{selected_profile_name}"
+                elif action == "delete_profile":
+                    if not selected_profile_name:
+                        raise ValueError("请先选择要删除的档案")
+                    data = _load_api_profiles()
+                    old_profiles = data.get("profiles") or []
+                    new_profiles = [
+                        p for p in old_profiles
+                        if _sanitize_profile_name(str(p.get("name", ""))) != selected_profile_name
+                    ]
+                    if len(new_profiles) == len(old_profiles):
+                        raise ValueError(f"未找到档案：{selected_profile_name}")
+                    data["profiles"] = new_profiles
+                    if _sanitize_profile_name(str(data.get("active_profile", ""))) == selected_profile_name:
+                        data["active_profile"] = ""
+                        _write_env_pairs({}, clears={ACTIVE_PROFILE_ENV_KEY})
+                    _save_api_profiles(data)
+                    msg = f"已删除 API 档案：{selected_profile_name}"
+                    selected_profile_name = ""
+                else:
+                    raise ValueError(f"未知操作：{action}")
+
+                self._write_html(_render_settings_page(success=msg, selected_profile_name=selected_profile_name))
             except Exception as exc:
                 self._write_html(
-                    _render_settings_page(error=f"保存失败: {exc}"),
+                    _render_settings_page(error=f"保存失败: {exc}", selected_profile_name=selected_profile_name),
                     status=400,
                 )
             return
@@ -1556,6 +1963,7 @@ class _Handler(BaseHTTPRequestHandler):
             form = {
                 "ui_mode": _first("ui_mode", "prod"),
                 "output_dir": _first("output_dir", "outputs"),
+                "api_profile": _first("api_profile", ""),
                 "topic_mode": _first("topic_mode", "auto"),
                 "web_enrichment_mode": _first("web_enrichment_mode", "auto"),
                 "enable_web_enrichment": "enable_web_enrichment" in fields,
@@ -1570,6 +1978,7 @@ class _Handler(BaseHTTPRequestHandler):
             form = {
                 "ui_mode": (form_raw.get("ui_mode") or ["prod"])[0],
                 "output_dir": (form_raw.get("output_dir") or ["outputs"])[0],
+                "api_profile": (form_raw.get("api_profile") or [""])[0],
                 "topic_mode": (form_raw.get("topic_mode") or ["auto"])[0],
                 "web_enrichment_mode": (form_raw.get("web_enrichment_mode") or ["auto"])[0],
                 "enable_web_enrichment": "enable_web_enrichment" in form_raw,
@@ -1653,17 +2062,34 @@ class _Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 kp_max = 12
 
-            result = run_pipeline(
-                files,
-                output_dir=str(_resolve_output_dir(str(form.get("output_dir", "")))),
-                topic_mode=str(form["topic_mode"] or "auto"),
-                web_enrichment_enabled=bool(form["enable_web_enrichment"]),
-                web_enrichment_mode=str(form["web_enrichment_mode"] or "auto"),
-                export_docx=bool(form["export_docx"]),
-                keypoint_min_confidence=kp_min,
-                keypoint_max_points=kp_max,
-                notifier=None,
-            )
+            selected_profile_name = _sanitize_profile_name(str(form.get("api_profile", "") or ""))
+            selected_profile: Dict[str, Any] | None = None
+            if selected_profile_name:
+                profile_payload = _load_api_profiles()
+                selected_profile = _profile_by_name(profile_payload, selected_profile_name)
+                if selected_profile is None:
+                    raise ValueError(f"未找到 API 档案：{selected_profile_name}")
+
+            def _run() -> Dict[str, Any]:
+                return run_pipeline(
+                    files,
+                    output_dir=str(_resolve_output_dir(str(form.get("output_dir", "")))),
+                    topic_mode=str(form["topic_mode"] or "auto"),
+                    web_enrichment_enabled=bool(form["enable_web_enrichment"]),
+                    web_enrichment_mode=str(form["web_enrichment_mode"] or "auto"),
+                    export_docx=bool(form["export_docx"]),
+                    keypoint_min_confidence=kp_min,
+                    keypoint_max_points=kp_max,
+                    notifier=None,
+                )
+
+            if selected_profile is not None:
+                with _temporary_profile_env(selected_profile):
+                    result = _run()
+                notes = result.get("pipeline_notes") or []
+                result["pipeline_notes"] = notes + [f"ui api profile used: {selected_profile_name}"]
+            else:
+                result = _run()
             # If some uploads were rejected on size, make that visible even
             # on the success page -- attach a pipeline_note.
             if preamble_notes:
