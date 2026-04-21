@@ -10,6 +10,7 @@
 1. `project_memory/01_readme_baseline.md`
 2. `project_memory/02_skill_draft.md`
 3. `project_memory/03_mvp_task_constraints.md`
+4. `project_memory/04_final_status_snapshot_2026-04-21.md`
 
 ## Hard Constraints (Execution Baseline)
 
@@ -25,4 +26,5 @@
 ## Notes
 
 - 本目录用于固定"对话中确认过的项目约束与规划"。
+- 最新状态快照：`project_memory/04_final_status_snapshot_2026-04-21.md`（用于快速回忆本次交付结果与剩余阻塞）。
 - 若后续约束变更，请在本目录新增版本文件并更新本索引；同时同步 `docs/PROJECT_STATE.md` 与 `docs/ACCEPTANCE.md`。
