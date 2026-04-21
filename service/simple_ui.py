@@ -43,10 +43,24 @@ OUTPUT_WHITELIST_ROOT = (ROOT / "outputs").resolve()
 # Per-module overrides (TOPIC_/WEB_ENRICHMENT_) can still be edited in
 # the .env file manually; they are not in the UI on purpose to keep the
 # settings surface small.
+# Unified API keys shown in the "主设置" section of /settings.
 API_ENV_KEYS = [
     "KNOWLEDGEHARNESS_API_URL",
     "KNOWLEDGEHARNESS_API_KEY",
 ]
+# Per-module override keys shown in the collapsed "按模块覆盖" section.
+# They fall back to the unified keys when left blank at runtime
+# (see tools/topic_coarse_classify.py and tools/web_enrichment.py).
+MODULE_OVERRIDE_KEYS = [
+    ("TOPIC_CLASSIFIER_API_URL", "url", "Topic 分类 · API 地址"),
+    ("TOPIC_CLASSIFIER_API_KEY", "password", "Topic 分类 · 密钥"),
+    ("TOPIC_CLASSIFIER_API_TEMPLATE", "url", "Topic 分类 · 模板文件路径"),
+    ("WEB_ENRICHMENT_API_URL", "url", "Web 补充 · API 地址"),
+    ("WEB_ENRICHMENT_API_KEY", "password", "Web 补充 · 密钥"),
+    ("WEB_ENRICHMENT_API_TEMPLATE", "url", "Web 补充 · 模板文件路径"),
+]
+ALL_SETTINGS_KEYS = API_ENV_KEYS + [k for k, _, _ in MODULE_OVERRIDE_KEYS]
+
 SHOW_LAB_LINK = os.getenv("KH_UI_SHOW_LAB_LINK", "0").strip() == "1"
 
 # ---------------------------------------------------------------------------
@@ -148,27 +162,39 @@ def _read_env_pairs(path: Path = ENV_PATH) -> Dict[str, str]:
     return pairs
 
 
-def _write_env_pairs(updates: Dict[str, str], path: Path = ENV_PATH) -> List[str]:
-    """Persist non-empty updates to .env without clobbering other keys.
+def _write_env_pairs(
+    updates: Dict[str, str],
+    path: Path = ENV_PATH,
+    clears: "set[str] | None" = None,
+) -> Tuple[List[str], List[str]]:
+    """Persist changes to .env.
 
-    Empty submissions are treated as "keep previous value" so the UI can
-    render blank inputs without resetting existing secrets when the user
-    only wants to edit one field.
+    Args:
+        updates: {key: value} — only non-empty values are written. Empty
+                 values are treated as "keep the previous value" so the
+                 UI can render blank password inputs without clobbering
+                 existing secrets.
+        clears:  set of keys that the user explicitly asked to clear.
+                 For each such key the line is rewritten as `KEY=` (empty
+                 value preserved, comment/structure untouched).
 
-    Returns the list of keys that were actually updated.
+    Returns:
+        (touched_keys, cleared_keys) — callers surface a flash message
+        per list so the user sees exactly what changed.
     """
+    clears = set(clears or [])
     existing_lines: List[str] = []
     if path.exists() and path.is_file():
         existing_lines = path.read_text(encoding="utf-8").splitlines()
 
-    # Discard empty-string updates so leaving a field blank preserves the
-    # existing value. Callers wanting to CLEAR a key must write a literal
-    # sentinel, which this UI intentionally does not offer.
-    effective = {k: v for k, v in updates.items() if v}
-    if not effective:
-        return []
+    # Drop update entries that are empty AND not explicitly cleared so
+    # the old value is preserved.
+    effective = {k: v for k, v in updates.items() if v and k not in clears}
+    if not effective and not clears:
+        return [], []
 
-    touched = set()
+    touched: set = set()
+    cleared: set = set()
     new_lines: List[str] = []
     for raw in existing_lines:
         s = raw.strip()
@@ -176,24 +202,40 @@ def _write_env_pairs(updates: Dict[str, str], path: Path = ENV_PATH) -> List[str
             new_lines.append(raw)
             continue
         key = raw.split("=", 1)[0].strip()
-        if key in effective:
+        if key in clears:
+            new_lines.append(f"{key}=")
+            cleared.add(key)
+        elif key in effective:
             new_lines.append(f"{key}={effective[key]}")
             touched.add(key)
         else:
             new_lines.append(raw)
 
+    # Append keys that did not already exist in the file.
     for k, v in effective.items():
         if k not in touched:
             new_lines.append(f"{k}={v}")
+            touched.add(k)
+    for k in clears:
+        if k not in cleared:
+            new_lines.append(f"{k}=")
+            cleared.add(k)
 
     if not new_lines:
         new_lines = [f"{k}={v}" for k, v in effective.items()]
+        new_lines.extend(f"{k}=" for k in clears)
     path.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
 
+    # Reflect changes into the running process's env so the pipeline
+    # picks them up without requiring a restart.
     for k, v in effective.items():
         os.environ[k] = v
+    for k in clears:
+        # "Clearing" in the running process means setting empty string,
+        # so downstream `os.getenv(k, "").strip()` treats it as unset.
+        os.environ[k] = ""
 
-    return list(effective.keys())
+    return list(touched), list(cleared)
 
 
 def _mask_value(value: str) -> str:
@@ -207,6 +249,30 @@ def _mask_value(value: str) -> str:
     if len(v) <= 4:
         return "已配置"
     return f"已配置（末 4 位：···{v[-4:]}）"
+
+
+def _api_status_chip() -> str:
+    """Return an HTML chip describing whether any API URL is configured.
+
+    Rendered at page-top so users know at a glance whether the run will
+    stay fully local or will call out to an external service. Clickable
+    so one click lands on /settings.
+    """
+    unified = bool(os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip())
+    topic = bool(os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip())
+    web = bool(os.getenv("WEB_ENRICHMENT_API_URL", "").strip())
+    if unified or topic or web:
+        label = "API 已配置"
+        tone = "api-chip on"
+        hint = "点击调整密钥与按模块覆盖"
+    else:
+        label = "本地模式"
+        tone = "api-chip off"
+        hint = "无任何 API 配置，所有步骤在本地完成"
+    return (
+        f'<a class="{tone}" href="/settings" title="{html.escape(hint)}">'
+        f'<span class="api-chip-dot"></span>{label}</a>'
+    )
 
 
 def _safe_filename(name: str) -> str:
@@ -902,6 +968,29 @@ def _render_page(
       background: #fef3c7; color: var(--warn); border: 1px solid #fde68a;
       font-size: 11.5px; font-weight: 500;
     }}
+    /* API status chip in the header — prod-mode-safe (never shows any
+       value, only configured/not-configured). */
+    .api-chip {{
+      display: inline-flex; align-items: center; gap: 6px;
+      text-decoration: none;
+      padding: 2px 10px; border-radius: 999px;
+      font-size: 11.5px; font-weight: 500;
+      border: 1px solid var(--border);
+      background: var(--surface); color: var(--text);
+    }}
+    .api-chip:hover {{ background: var(--accent-soft); }}
+    .api-chip-dot {{
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--text-muted);
+    }}
+    .api-chip.on {{
+      background: #ecfdf5; color: var(--ok); border-color: #a7f3d0;
+    }}
+    .api-chip.on .api-chip-dot {{ background: var(--ok); }}
+    .api-chip.off {{
+      background: var(--surface-2); color: var(--text-muted);
+    }}
+    .api-chip.off .api-chip-dot {{ background: #9ca3af; }}
 
     /* validation badge used inside lab summary */
     .badge {{ display: inline-block; padding: 2px 10px; border-radius: 999px;
@@ -1038,7 +1127,7 @@ def _render_page(
 <body>
   <div class="wrap">
     <header class="app-header">
-      <h1>{page_title}{mode_badge}</h1>
+      <h1>{page_title}{mode_badge}{_api_status_chip()}</h1>
       <p class="subtitle">{html.escape(page_subtitle)}</p>
     </header>
 
@@ -1087,14 +1176,54 @@ def _render_page(
 def _render_settings_page(error: str = "", success: str = "") -> str:
     """Settings page that never echoes API values back into the DOM.
 
-    Instead shows a masked status line (e.g. "已配置（末 4 位：···abcd）") and
-    leaves the input empty. An empty submission keeps the existing value.
+    Structure:
+    - "主设置" — the unified KNOWLEDGEHARNESS_* pair; recommended for
+      most users.
+    - "按模块覆盖" (collapsed by default) — per-module URL/KEY/TEMPLATE
+      for Topic Classifier and Web Enrichment. These override the
+      unified key at runtime when set.
+    - Every field pairs an input with a "清空此字段" checkbox so the user
+      can remove a secret without hand-editing `.env`.
     """
     envs = _read_env_pairs()
-    statuses: Dict[str, str] = {}
-    for key in API_ENV_KEYS:
+
+    def _status(key: str) -> str:
         current = envs.get(key) or os.getenv(key) or ""
-        statuses[key] = _mask_value(current)
+        return _mask_value(current)
+
+    def _render_field(key: str, kind: str, label: str) -> str:
+        field_type = "password" if kind == "password" else "text"
+        auto = "new-password" if kind == "password" else "off"
+        placeholder = "留空保持当前值；如需删除请勾选右侧清空"
+        return f"""
+        <div class="row">
+          <label for="{key}">{html.escape(label)}</label>
+          <span class="status-chip">{html.escape(_status(key))}</span>
+          <div class="field-with-clear">
+            <input id="{key}" type="{field_type}" name="{key}"
+                   value="" placeholder="{placeholder}"
+                   autocomplete="{auto}" />
+            <label class="clear-box">
+              <input type="checkbox" name="{key}__clear" />
+              <span>清空此字段</span>
+            </label>
+          </div>
+          <p class="hint">环境变量 <code>{key}</code></p>
+        </div>
+        """
+
+    unified_section = "".join(
+        _render_field(
+            k,
+            "password" if k.endswith("_KEY") else "url",
+            "统一 API 地址" if k.endswith("_URL") else "统一 API 密钥",
+        )
+        for k in API_ENV_KEYS
+    )
+    module_section = "".join(
+        _render_field(k, kind, label)
+        for k, kind, label in MODULE_OVERRIDE_KEYS
+    )
 
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     success_html = f'<div class="ok">{html.escape(success)}</div>' if success else ""
@@ -1110,7 +1239,7 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
       --border: #e5e7eb; --border-soft: #eef0f3;
       --text: #111827; --text-muted: #6b7280;
       --accent: #111827; --accent-ink: #ffffff; --accent-soft: #f3f4f6;
-      --ok: #047857;
+      --ok: #047857; --danger: #b91c1c;
       --radius: 10px; --radius-sm: 6px;
       --shadow-1: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
     }}
@@ -1125,7 +1254,7 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
       font-size: 14.5px; line-height: 1.55;
       -webkit-font-smoothing: antialiased;
     }}
-    .wrap {{ max-width: 640px; margin: 0 auto; }}
+    .wrap {{ max-width: 680px; margin: 0 auto; }}
     .app-header h1 {{ margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }}
     .app-header .subtitle {{ margin: 6px 0 0 0; color: var(--text-muted); font-size: 13.5px; }}
     .app-header {{ margin-bottom: 20px; }}
@@ -1134,6 +1263,7 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
       border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px;
       box-shadow: var(--shadow-1);
     }}
+    .card h2 {{ margin: 0 0 14px 0; font-size: 15px; font-weight: 600; }}
     label {{ display: block; margin-bottom: 6px; font-weight: 500; font-size: 13.5px; }}
     input[type=text], input[type=password] {{
       width: 100%; padding: 8px 10px;
@@ -1149,6 +1279,16 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
       background: var(--accent-soft); color: var(--text-muted);
       font-size: 12px; margin-bottom: 6px;
     }}
+    .field-with-clear {{ display: flex; align-items: center; gap: 12px; }}
+    .field-with-clear > input[type=text],
+    .field-with-clear > input[type=password] {{ flex: 1 1 auto; }}
+    .clear-box {{
+      display: inline-flex; align-items: center; gap: 6px;
+      margin: 0; font-weight: 400; font-size: 12.5px;
+      color: var(--text-muted); cursor: pointer;
+      white-space: nowrap;
+    }}
+    .clear-box input[type=checkbox] {{ margin: 0; }}
     button {{
       background: var(--accent); color: var(--accent-ink);
       border: 0; border-radius: var(--radius-sm);
@@ -1162,7 +1302,7 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
       padding: 8px 16px; font-weight: 500;
     }}
     .back:hover {{ background: var(--accent-soft); }}
-    .hint {{ color: var(--text-muted); font-size: 12.5px; margin-top: 0; }}
+    .hint {{ color: var(--text-muted); font-size: 12.5px; margin: 4px 0 0 0; }}
     code {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12.5px; background: var(--accent-soft);
@@ -1172,38 +1312,53 @@ def _render_settings_page(error: str = "", success: str = "") -> str:
              padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px; font-size: 13.5px; }}
     .ok {{ background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0;
           padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px; font-size: 13.5px; }}
+    details {{
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 10px 14px; background: var(--surface-2); margin-top: 8px;
+    }}
+    details > summary {{
+      cursor: pointer; font-weight: 500; font-size: 13.5px;
+      margin-bottom: 6px; list-style: none;
+    }}
+    details > summary::before {{
+      content: "▸"; display: inline-block; margin-right: 6px;
+      color: var(--text-muted); transition: transform .15s;
+    }}
+    details[open] > summary::before {{ transform: rotate(90deg); }}
+    details[open] {{ padding-bottom: 6px; }}
+    .section-title {{
+      font-size: 12.5px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin: 0 0 10px 0;
+    }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <header class="app-header">
       <h1>API 设置</h1>
-      <p class="subtitle">密钥写入项目根 <code>.env</code>。留空字段表示保持当前值。</p>
+      <p class="subtitle">密钥写入项目根 <code>.env</code>。默认只用"主设置"里的统一 API；进阶需求请展开"按模块覆盖"。</p>
     </header>
     <section class="card">
       {error_html}
       {success_html}
       <form method="post" action="/settings" autocomplete="off">
-        <div class="row">
-          <label for="KNOWLEDGEHARNESS_API_URL">统一 API 地址</label>
-          <span class="status-chip">{html.escape(statuses['KNOWLEDGEHARNESS_API_URL'])}</span>
-          <input id="KNOWLEDGEHARNESS_API_URL" type="text"
-                 name="KNOWLEDGEHARNESS_API_URL" value=""
-                 placeholder="留空保持当前值" autocomplete="off" />
-          <p class="hint">对应环境变量 <code>KNOWLEDGEHARNESS_API_URL</code>。</p>
-        </div>
+        <p class="section-title">主设置（默认所有模块共用）</p>
+        {unified_section}
 
-        <div class="row">
-          <label for="KNOWLEDGEHARNESS_API_KEY">统一 API 密钥</label>
-          <span class="status-chip">{html.escape(statuses['KNOWLEDGEHARNESS_API_KEY'])}</span>
-          <input id="KNOWLEDGEHARNESS_API_KEY" type="password"
-                 name="KNOWLEDGEHARNESS_API_KEY" value=""
-                 placeholder="留空保持当前值" autocomplete="new-password" />
-          <p class="hint">出于安全原因，当前值不会回填输入框；要清空请手动编辑 <code>.env</code>。按模块覆盖请参考 <code>.env.example</code>。</p>
-        </div>
+        <details>
+          <summary>按模块覆盖（可选；留空即回退到主设置）</summary>
+          <p class="hint" style="margin-bottom: 12px;">
+            下列环境变量优先于主设置。未填时，Topic 分类与 Web 补充都会自动回退到
+            <code>KNOWLEDGEHARNESS_*</code>。
+          </p>
+          {module_section}
+        </details>
 
-        <button type="submit">保存</button>
-        <a class="back" href="/">返回</a>
+        <div style="margin-top: 18px;">
+          <button type="submit">保存</button>
+          <a class="back" href="/">返回</a>
+        </div>
       </form>
     </section>
   </div>
@@ -1305,13 +1460,22 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 updates = {
                     k: (form_raw.get(k) or [""])[0].strip()
-                    for k in API_ENV_KEYS
+                    for k in ALL_SETTINGS_KEYS
                 }
-                touched = _write_env_pairs(updates)
+                clears = {
+                    k for k in ALL_SETTINGS_KEYS
+                    if (form_raw.get(f"{k}__clear") or [""])[0]
+                }
+                touched, cleared = _write_env_pairs(updates, clears=clears)
+                parts: List[str] = []
+                if touched:
+                    parts.append(f"更新了 {', '.join(touched)}")
+                if cleared:
+                    parts.append(f"已清空 {', '.join(cleared)}")
                 msg = (
-                    f"保存成功：更新了 {', '.join(touched)}"
-                    if touched
-                    else "未更改任何字段（所有字段留空视为保持原值）"
+                    "保存成功：" + "；".join(parts)
+                    if parts
+                    else "未更改任何字段（所有字段留空且无清空请求视为保持原值）"
                 )
                 self._write_html(_render_settings_page(success=msg))
             except Exception as exc:
