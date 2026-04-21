@@ -26,7 +26,8 @@ Last Updated: 2026-04-21
 - [x] 一键启动与桌面打包链路：`launch_app.py` + `scripts/build_desktop.py`（`7d2fd23`）
 - [x] UI 专业视觉体系重构：CSS token / 系统字体栈含 CJK fallback / 一致圆角 / 响应式断点 / focus-ring（`5127194`，功能零改动）
 - [x] 主页流程感知 Header：`API 状态` chip，只显 on/off，永不回显值（`b58fa67`）
-- [x] `/settings` 完整 API 覆盖：按模块覆盖折叠栏 + 每字段"清空此字段" checkbox + `_write_env_pairs(clears=...)` 语义（`b58fa67`）
+- [x] `/settings` 完整 API 覆盖：按模块覆盖折叠栏 + 字段级清空语义（`KEY__clear` + `_write_env_pairs(clears=...)`）（`b58fa67`，后续 UI 改为内联 clear 按钮）
+- [x] `/settings` 控制台紧凑化：顶部状态栏 + 主从档案布局 + 内联 clear/密钥显隐/复制 + 档案详情内聚危险操作（unreleased）
 - [x] 治理文档同步基线：六份文档与代码对齐（`af81467`）
 - [x] Flask 最小服务入口 + 入口测试（`service/flask_server.py` / `tests/test_flask_service_entry.py`）
 

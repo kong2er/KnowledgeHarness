@@ -1303,13 +1303,7 @@ def _render_settings_page(
     success: str = "",
     selected_profile_name: str = "",
 ) -> str:
-    """Settings page that never echoes API values back into the DOM.
-
-    Structure:
-    - 主设置 + 模块覆盖（写入 .env）
-    - API 档案管理（保存多个 API 配置、应用、删除）
-    - 显式“清空全部 API 环境配置”动作（无需手工编辑 .env）
-    """
+    """Render the API harness settings console."""
     envs = _read_env_pairs()
     profiles_payload = _load_api_profiles()
     names = _profile_names(profiles_payload)
@@ -1331,21 +1325,28 @@ def _render_settings_page(
     def _render_field(key: str, kind: str, label: str) -> str:
         field_type = "password" if kind == "password" else "text"
         auto = "new-password" if kind == "password" else "off"
-        placeholder = "留空保持当前值；如需删除请勾选右侧清空"
+        placeholder = "留空保持当前值；点击右侧 × 可清空"
+        toggle = ""
+        if kind == "password":
+            toggle = (
+                f'<button type="button" class="icon-btn" title="显示/隐藏" '
+                f'data-toggle-visibility="{key}">👁</button>'
+            )
         return f"""
-        <div class="row">
+        <div class="form-row">
           <label for="{key}">{html.escape(label)}</label>
-          <span class="status-chip">{html.escape(_status(key))}</span>
-          <div class="field-with-clear">
-            <input id="{key}" type="{field_type}" name="{key}"
-                   value="" placeholder="{placeholder}"
-                   autocomplete="{auto}" />
-            <label class="clear-box">
-              <input type="checkbox" name="{key}__clear" />
-              <span>清空此字段</span>
-            </label>
+          <div class="field-meta">
+            <span class="status-chip">{html.escape(_status(key))}</span>
+            <span class="env-name">{html.escape(key)}</span>
           </div>
-          <p class="hint">环境变量 <code>{key}</code></p>
+          <div class="input-wrap">
+            <input id="{key}" type="{field_type}" name="{key}" value=""
+                   placeholder="{placeholder}" autocomplete="{auto}" />
+            <input type="hidden" name="{key}__clear" value="" data-clear-target="{key}" />
+            <button type="button" class="icon-btn" title="清空字段" data-clear-field="{key}">×</button>
+            {toggle}
+            <button type="button" class="icon-btn" title="复制当前输入" data-copy-field="{key}">复制</button>
+          </div>
         </div>
         """
 
@@ -1357,23 +1358,11 @@ def _render_settings_page(
         )
         for k in API_ENV_KEYS
     )
-    module_section = "".join(
-        _render_field(k, kind, label)
-        for k, kind, label in MODULE_OVERRIDE_KEYS
-    )
+    module_section = "".join(_render_field(k, kind, label) for k, kind, label in MODULE_OVERRIDE_KEYS)
     options = "".join(
         f'<option value="{html.escape(n)}" {_selected(selected_profile_name, n)}>{html.escape(n)}</option>'
         for n in names
     ) or '<option value="">（暂无可选档案）</option>'
-    profiles_html = "".join(
-        "<tr>"
-        f"<td>{html.escape(n)}</td>"
-        f"<td>{'是' if n == active_profile else '否'}</td>"
-        "</tr>"
-        for n in names
-    )
-    if not profiles_html:
-        profiles_html = '<tr><td colspan="2">（暂无档案）</td></tr>'
 
     def _detail_value(key: str, value: str) -> str:
         raw = (value or "").strip()
@@ -1384,27 +1373,52 @@ def _render_settings_page(
         return html.escape(raw)
 
     profile_detail_rows = ""
+    selected_profile_configured = 0
     if selected_profile is not None:
         rows = []
         for k in PROFILE_ENV_KEYS:
+            value = str(selected_profile.get(k, "") or "")
+            if value.strip():
+                selected_profile_configured += 1
             rows.append(
                 "<tr>"
                 f"<td><code>{html.escape(k)}</code></td>"
-                f"<td>{_detail_value(k, str(selected_profile.get(k, '') or ''))}</td>"
+                f"<td>{_detail_value(k, value)}</td>"
                 "</tr>"
             )
         profile_detail_rows = "".join(rows)
     else:
-        profile_detail_rows = '<tr><td colspan="2">请选择一个档案后点击“查看档案详情”。</td></tr>'
+        profile_detail_rows = '<tr><td colspan="2">当前未选中档案，请先在上方选择。</td></tr>'
+
+    profiles_list_html = "".join(
+        "<tr>"
+        f"<td>{html.escape(n)}</td>"
+        f"<td>{'已激活' if n == active_profile else '—'}</td>"
+        "</tr>"
+        for n in names
+    )
+    if not profiles_list_html:
+        profiles_list_html = '<tr><td colspan="2">（暂无档案）</td></tr>'
 
     unified_url = (envs.get("KNOWLEDGEHARNESS_API_URL") or os.getenv("KNOWLEDGEHARNESS_API_URL", "")).strip()
     topic_url = (envs.get("TOPIC_CLASSIFIER_API_URL") or os.getenv("TOPIC_CLASSIFIER_API_URL", "")).strip()
     web_url = (envs.get("WEB_ENRICHMENT_API_URL") or os.getenv("WEB_ENRICHMENT_API_URL", "")).strip()
     configured_modules = int(bool(topic_url or unified_url)) + int(bool(web_url or unified_url))
+    advanced_configured = sum(
+        1 for k, _, _ in MODULE_OVERRIDE_KEYS if (envs.get(k) or os.getenv(k, "")).strip()
+    )
     status_label = "Ready" if configured_modules == 2 else ("Partial" if configured_modules else "Incomplete")
+    status_badge = (
+        "status-ready" if status_label == "Ready"
+        else ("status-partial" if status_label == "Partial" else "status-incomplete")
+    )
 
-    error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
-    success_html = f'<div class="ok">{html.escape(success)}</div>' if success else ""
+    toast_html = ""
+    if success:
+        toast_html = f'<div class="toast toast-ok" role="status">{html.escape(success)}</div>'
+    elif error:
+        toast_html = f'<div class="toast toast-error" role="alert">{html.escape(error)}</div>'
+
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1417,245 +1431,349 @@ def _render_settings_page(
       --border: #e5e7eb; --border-soft: #eef0f3;
       --text: #111827; --text-muted: #6b7280;
       --accent: #111827; --accent-ink: #ffffff; --accent-soft: #f3f4f6;
-      --ok: #047857; --danger: #b91c1c;
+      --ok: #047857; --danger: #b91c1c; --warn: #b45309;
       --radius: 10px; --radius-sm: 6px;
       --shadow-1: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
     }}
     * {{ box-sizing: border-box; }}
     html, body {{ margin: 0; padding: 0; }}
     body {{
-      padding: 32px 24px 64px; background: var(--bg); color: var(--text);
+      padding: 28px 22px 64px; background: var(--bg); color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
                    "Helvetica Neue", Helvetica, Arial,
                    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
                    "Noto Sans CJK SC", sans-serif;
-      font-size: 14.5px; line-height: 1.55;
+      font-size: 14px; line-height: 1.5;
       -webkit-font-smoothing: antialiased;
     }}
-    .wrap {{ max-width: 760px; margin: 0 auto; }}
+    .wrap {{ max-width: 1160px; margin: 0 auto; }}
     .app-header h1 {{ margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }}
-    .app-header .subtitle {{ margin: 6px 0 0 0; color: var(--text-muted); font-size: 13.5px; }}
-    .app-header {{ margin-bottom: 20px; }}
-    .card {{
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px;
+    .app-header .subtitle {{ margin: 6px 0 0 0; color: var(--text-muted); font-size: 13px; }}
+    .app-header {{ margin-bottom: 14px; }}
+    .status-bar {{
+      display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center;
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      background: var(--surface); padding: 10px 12px; margin-bottom: 14px;
       box-shadow: var(--shadow-1);
     }}
-    .card h2 {{ margin: 0 0 14px 0; font-size: 15px; font-weight: 600; }}
-    label {{ display: block; margin-bottom: 6px; font-weight: 500; font-size: 13.5px; }}
-    input[type=text], input[type=password] {{
+    .status-item {{ color: var(--text-muted); font-size: 12.5px; }}
+    .status-item b {{ color: var(--text); font-weight: 600; }}
+    .status-ready {{ color: var(--ok) !important; }}
+    .status-partial {{ color: var(--warn) !important; }}
+    .status-incomplete {{ color: var(--danger) !important; }}
+    .layout {{
+      display: grid; gap: 14px;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+      align-items: start;
+    }}
+    .card {{
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-1);
+    }}
+    .card h2 {{ margin: 0 0 12px 0; font-size: 15px; font-weight: 600; }}
+    .section-note {{ margin: -4px 0 14px 0; color: var(--text-muted); font-size: 12.5px; }}
+    .form-row {{ margin-bottom: 14px; }}
+    label {{ display: block; margin-bottom: 6px; font-weight: 500; font-size: 13px; }}
+    .field-meta {{ display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }}
+    .status-chip {{
+      display: inline-block; padding: 1px 8px; border-radius: 999px;
+      background: var(--accent-soft); color: var(--text-muted); font-size: 11.5px;
+    }}
+    .env-name {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--text-muted); font-size: 11.5px;
+    }}
+    .input-wrap {{
+      display: grid; gap: 8px; align-items: center;
+      grid-template-columns: minmax(0, 1fr) auto auto auto;
+    }}
+    input[type=text], input[type=password], select {{
       width: 100%; padding: 8px 10px;
       border: 1px solid var(--border); border-radius: var(--radius-sm);
       background: var(--surface); font: inherit;
       transition: border-color .15s, box-shadow .15s;
     }}
-    input:focus {{ outline: none; border-color: var(--text);
-                  box-shadow: 0 0 0 3px rgba(17,24,39,.08); }}
-    .row {{ margin-bottom: 18px; }}
-    .status-chip {{
-      display: inline-block; padding: 2px 10px; border-radius: 999px;
-      background: var(--accent-soft); color: var(--text-muted);
-      font-size: 12px; margin-bottom: 6px;
+    input:focus, select:focus {{
+      outline: none; border-color: var(--text);
+      box-shadow: 0 0 0 3px rgba(17,24,39,.08);
     }}
-    .field-with-clear {{ display: flex; align-items: center; gap: 12px; }}
-    .field-with-clear > input[type=text],
-    .field-with-clear > input[type=password] {{ flex: 1 1 auto; }}
-    .clear-box {{
-      display: inline-flex; align-items: center; gap: 6px;
-      margin: 0; font-weight: 400; font-size: 12.5px;
-      color: var(--text-muted); cursor: pointer;
-      white-space: nowrap;
+    .icon-btn {{
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--text-muted); border-radius: var(--radius-sm);
+      height: 34px; min-width: 34px; padding: 0 8px;
+      font-size: 12px; cursor: pointer;
     }}
-    .clear-box input[type=checkbox] {{ margin: 0; }}
+    .icon-btn:hover {{ background: var(--accent-soft); color: var(--text); }}
+    .btn-row {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
     button {{
       background: var(--accent); color: var(--accent-ink);
       border: 0; border-radius: var(--radius-sm);
-      padding: 8px 16px; font: inherit; font-weight: 500; cursor: pointer;
+      padding: 8px 14px; font: inherit; font-weight: 500; cursor: pointer;
     }}
     button:hover {{ background: #000; }}
-    .back {{
-      display: inline-block; margin-left: 8px; text-decoration: none;
-      background: var(--surface); color: var(--text);
-      border: 1px solid var(--border); border-radius: var(--radius-sm);
-      padding: 8px 16px; font-weight: 500;
-    }}
-    .back:hover {{ background: var(--accent-soft); }}
-    .hint {{ color: var(--text-muted); font-size: 12.5px; margin: 4px 0 0 0; }}
-    code {{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12.5px; background: var(--accent-soft);
-      padding: 1px 5px; border-radius: 4px;
-    }}
-    .error {{ background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
-             padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px; font-size: 13.5px; }}
-    .ok {{ background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0;
-          padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px; font-size: 13.5px; }}
-    details {{
-      border: 1px solid var(--border); border-radius: var(--radius-sm);
-      padding: 10px 14px; background: var(--surface-2); margin-top: 8px;
-    }}
-    details > summary {{
-      cursor: pointer; font-weight: 500; font-size: 13.5px;
-      margin-bottom: 6px; list-style: none;
-    }}
-    details > summary::before {{
-      content: "▸"; display: inline-block; margin-right: 6px;
-      color: var(--text-muted); transition: transform .15s;
-    }}
-    details[open] > summary::before {{ transform: rotate(90deg); }}
-    details[open] {{ padding-bottom: 6px; }}
-    .section-title {{
-      font-size: 12.5px; font-weight: 600; color: var(--text-muted);
-      text-transform: uppercase; letter-spacing: 0.06em;
-      margin: 0 0 10px 0;
-    }}
-    .overview-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-    }}
-    .ov-item {{
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      background: var(--surface-2);
-      padding: 10px 12px;
-    }}
-    .ov-item .k {{ font-size: 12px; color: var(--text-muted); }}
-    .ov-item .v {{ margin-top: 4px; font-size: 13px; font-weight: 600; color: var(--text); }}
-    .status-ready {{ color: #047857; }}
-    .status-partial {{ color: #b45309; }}
-    .status-incomplete {{ color: #b91c1c; }}
-    .mini-table {{
-      width: 100%; border-collapse: collapse; margin-top: 10px;
-      border: 1px solid var(--border); border-radius: var(--radius-sm);
-      overflow: hidden;
-    }}
-    .mini-table th, .mini-table td {{
-      border-bottom: 1px solid var(--border-soft); padding: 8px 10px;
-      text-align: left; font-size: 13px;
-    }}
-    .mini-table th {{ background: var(--surface-2); color: var(--text-muted); font-weight: 600; }}
-    .inline-actions {{
-      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-    }}
-    .danger-solid {{
-      background: #b91c1c; color: #fff; border: 0;
-    }}
-    .danger-solid:hover {{ background: #991b1b; }}
     .ghost-btn {{
       background: var(--surface); color: var(--text);
       border: 1px solid var(--border);
     }}
     .ghost-btn:hover {{ background: var(--accent-soft); }}
+    .danger-btn {{
+      background: #b91c1c; color: #fff; border: 0;
+    }}
+    .danger-btn:hover {{ background: #991b1b; }}
+    .back {{
+      display: inline-block; text-decoration: none;
+      background: var(--surface); color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 8px 14px; font-weight: 500;
+    }}
+    .back:hover {{ background: var(--accent-soft); }}
+    details {{
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 10px 12px;
+      background: var(--surface-2);
+    }}
+    details > summary {{
+      cursor: pointer; font-weight: 500; color: var(--text);
+      list-style: none; font-size: 13px;
+    }}
+    details > summary::before {{
+      content: "▸"; display: inline-block; margin-right: 6px; color: var(--text-muted);
+      transition: transform .15s;
+    }}
+    details[open] > summary::before {{ transform: rotate(90deg); }}
+    .mini-table {{
+      width: 100%; border-collapse: collapse; margin-top: 10px;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;
+    }}
+    .mini-table th, .mini-table td {{
+      border-bottom: 1px solid var(--border-soft); padding: 8px 10px;
+      text-align: left; font-size: 12.5px;
+      vertical-align: top;
+    }}
+    .mini-table th {{ background: var(--surface-2); color: var(--text-muted); font-weight: 600; }}
+    .mini-table tr:last-child td {{ border-bottom: 0; }}
+    code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px; background: var(--accent-soft);
+      padding: 1px 5px; border-radius: 4px;
+    }}
+    .empty-tip {{
+      border: 1px dashed var(--border); border-radius: var(--radius-sm);
+      background: var(--surface-2); color: var(--text-muted);
+      padding: 10px 12px; font-size: 12.5px;
+    }}
+    .toast {{
+      position: fixed; right: 16px; top: 16px; z-index: 50;
+      padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12.5px;
+      border: 1px solid transparent; box-shadow: var(--shadow-1);
+      max-width: 520px;
+    }}
+    .toast-ok {{ background: #ecfdf5; color: var(--ok); border-color: #a7f3d0; }}
+    .toast-error {{ background: #fef2f2; color: #991b1b; border-color: #fecaca; }}
+    .profile-card {{ margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-soft); }}
+    .profile-badges {{
+      display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px;
+      color: var(--text-muted); font-size: 12px;
+    }}
+    .profile-badge {{
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 999px; padding: 2px 10px;
+    }}
+    .danger-area {{ margin-top: 10px; }}
+    @media (max-width: 980px) {{
+      .layout {{ grid-template-columns: 1fr; }}
+    }}
     @media (max-width: 720px) {{
-      .overview-grid {{ grid-template-columns: 1fr 1fr; }}
-      .inline-actions {{ flex-direction: column; align-items: stretch; }}
+      body {{ padding: 20px 12px 42px; }}
+      .wrap {{ max-width: 100%; }}
+      .input-wrap {{ grid-template-columns: minmax(0, 1fr) auto auto; }}
+      .input-wrap .icon-btn[data-copy-field] {{ grid-column: 2 / span 2; }}
     }}
   </style>
 </head>
 <body>
+  {toast_html}
   <div class="wrap">
     <header class="app-header">
-      <h1>API 设置</h1>
-      <p class="subtitle">工程化配置流程：先看状态，再改配置，再应用档案，最后在危险区执行治理操作。</p>
+      <h1>API 配置控制台</h1>
+      <p class="subtitle">状态 > 配置 > 应用 > 治理。仅处理 API 环境与档案，不影响主流水线结构。</p>
     </header>
-    <section class="card">
-      <h2>状态概览</h2>
-      <div class="overview-grid">
-        <div class="ov-item"><div class="k">当前激活档案</div><div class="v">{html.escape(active_profile or "未指定")}</div></div>
-        <div class="ov-item"><div class="k">已保存档案数</div><div class="v">{len(names)}</div></div>
-        <div class="ov-item"><div class="k">模块配置完成数</div><div class="v">{configured_modules}/2</div></div>
-        <div class="ov-item"><div class="k">环境状态</div><div class="v {'status-ready' if status_label == 'Ready' else ('status-partial' if status_label == 'Partial' else 'status-incomplete')}">{status_label}</div></div>
-      </div>
+
+    <section class="status-bar">
+      <div class="status-item">当前激活档案：<b>{html.escape(active_profile or "未指定")}</b></div>
+      <div class="status-item">已保存档案：<b>{len(names)}</b></div>
+      <div class="status-item">模块就绪：<b>{configured_modules}/2</b></div>
+      <div class="status-item">最近连通性测试：<b>未执行</b></div>
+      <div class="status-item">环境状态：<b class="{status_badge}">{status_label}</b></div>
     </section>
-    <section class="card">
-      {error_html}
-      {success_html}
-      <form method="post" action="/settings" autocomplete="off">
-        <input type="hidden" name="action" value="save_env" />
-        <p class="section-title">基础配置（主流程）</p>
-        {unified_section}
 
-        <details>
-          <summary>高级配置（按模块覆盖，可选）</summary>
-          <p class="hint" style="margin-bottom: 12px;">
-            下列环境变量优先于主设置。未填时，Topic 分类与 Web 补充都会自动回退到
-            <code>KNOWLEDGEHARNESS_*</code>。
-          </p>
-          {module_section}
-        </details>
-
-        <div style="margin-top: 18px;">
-          <button type="submit">保存当前环境配置</button>
-          <a class="back" href="/">返回</a>
-        </div>
-      </form>
-    </section>
-    <section class="card">
-      <h2>API 档案管理</h2>
-      <p class="hint">
-        档案用于保存多套 API 地址/密钥。请先选择一个档案，详情会在下方统一展示。
-      </p>
-      <form method="post" action="/settings" autocomplete="off" style="margin-top: 12px;">
-        <input type="hidden" name="action" value="save_profile_current" />
-        <div class="row">
-          <label for="profile_name">新档案名称</label>
-          <input id="profile_name" type="text" name="profile_name" placeholder="例如：主线路 API / 备用 API" />
-          <p class="hint">保存的是“当前 .env 里已配置的 API 字段”；同名会覆盖。</p>
-        </div>
-        <div class="row">
-          <label class="clear-box">
-            <input type="checkbox" name="set_active_on_save" checked />
-            <span>保存后设为默认档案</span>
-          </label>
-        </div>
-        <button type="submit">保存当前配置为档案</button>
-      </form>
-
-      <form method="post" action="/settings" autocomplete="off" style="margin-top: 14px;">
-        <input type="hidden" name="action" value="select_profile" />
-        <div class="row">
-          <label for="selected_profile_name">选择现有档案</label>
-          <select id="selected_profile_name" name="selected_profile_name">
-            {options}
-          </select>
-          <p class="hint">详情显示 URL/模板路径明文，密钥仅掩码显示。</p>
-        </div>
-        <div class="inline-actions">
-          <button type="submit" class="ghost-btn">切换查看</button>
-          <button type="submit" name="action" value="apply_profile">应用到当前环境</button>
-          <label class="clear-box">
-            <input type="checkbox" name="apply_set_default" />
-            <span>同时设为默认档案</span>
-          </label>
-        </div>
-      </form>
-
-      <table class="mini-table">
-        <thead><tr><th>档案名</th><th>当前默认</th></tr></thead>
-        <tbody>{profiles_html}</tbody>
-      </table>
-      <h2 style="margin-top:16px;">选中档案详情</h2>
-      <table class="mini-table">
-        <thead><tr><th>字段</th><th>值</th></tr></thead>
-        <tbody>{profile_detail_rows}</tbody>
-      </table>
-      <details style="margin-top: 14px;">
-        <summary style="color: #b91c1c; font-weight: 600;">危险操作区（谨慎）</summary>
-        <p class="hint" style="margin-bottom: 12px;">
-          以下操作不可撤销：覆盖档案、删除档案、清空全部 API 配置。请先确认已选中正确档案。
-        </p>
+    <div class="layout">
+      <section class="card">
+        <h2>基础配置</h2>
+        <p class="section-note">优先填写统一地址和密钥。留空表示保持不变；点击字段右侧 × 会在保存时清空该字段。</p>
         <form method="post" action="/settings" autocomplete="off">
-          <input type="hidden" name="selected_profile_name" value="{html.escape(selected_profile_name)}" />
-          <div class="inline-actions">
-            <button type="submit" name="action" value="overwrite_profile_from_env" class="danger-solid">用当前环境覆盖该档案</button>
-            <button type="submit" name="action" value="delete_profile" class="danger-solid">删除该档案</button>
-            <button type="submit" name="action" value="clear_all_api_env" class="danger-solid">清空当前全部 API 配置</button>
+          <input type="hidden" name="action" value="save_env" />
+          {unified_section}
+
+          <details>
+            <summary>高级配置（按模块覆盖，已覆盖 {advanced_configured} 项）</summary>
+            <p class="section-note">模块字段为空时自动回退到统一 API 配置。</p>
+            {module_section}
+          </details>
+          <div class="btn-row" style="margin-top: 14px;">
+            <button type="submit">保存当前配置</button>
+            <a class="back" href="/">返回主页</a>
           </div>
         </form>
-      </details>
-    </section>
+      </section>
+
+      <section class="card">
+        <h2>API 档案</h2>
+        <p class="section-note">保存、切换和治理多套 API 配置。</p>
+
+        <form method="post" action="/settings" autocomplete="off">
+          <input type="hidden" name="action" value="select_profile" />
+          <div class="form-row">
+            <label for="selected_profile_name">当前档案</label>
+            <select id="selected_profile_name" name="selected_profile_name" onchange="this.form.submit()">
+              {options}
+            </select>
+          </div>
+          <div class="btn-row">
+            <button type="submit" class="ghost-btn">加载档案</button>
+          </div>
+        </form>
+
+        <table class="mini-table">
+          <thead><tr><th>档案名</th><th>状态</th></tr></thead>
+          <tbody>{profiles_list_html}</tbody>
+        </table>
+
+        <form method="post" action="/settings" autocomplete="off" class="profile-card">
+          <input type="hidden" name="action" value="save_profile_current" />
+          <div class="form-row">
+            <label for="profile_name">新建/覆盖档案名</label>
+            <input id="profile_name" type="text" name="profile_name" placeholder="例如：主线路 API / 备用 API" />
+          </div>
+          <div class="btn-row">
+            <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;color:var(--text-muted);">
+              <input type="checkbox" name="set_active_on_save" checked />
+              <span>保存后设为默认</span>
+            </label>
+            <button type="submit">保存当前环境为档案</button>
+          </div>
+        </form>
+
+        <div class="profile-card">
+          <h2 style="margin-bottom: 6px;">选中档案详情</h2>
+          <div class="profile-badges">
+            <span class="profile-badge">档案：{html.escape(selected_profile_name or "未选择")}</span>
+            <span class="profile-badge">已配置字段：{selected_profile_configured}/{len(PROFILE_ENV_KEYS)}</span>
+            <span class="profile-badge">默认：{"是" if selected_profile_name and selected_profile_name == active_profile else "否"}</span>
+          </div>
+          {"<div class='empty-tip'>请先选择一个档案后再执行应用或治理操作。</div>" if not selected_profile_name else ""}
+          <table class="mini-table">
+            <thead><tr><th>字段</th><th>值</th></tr></thead>
+            <tbody>{profile_detail_rows}</tbody>
+          </table>
+
+          <form method="post" action="/settings" autocomplete="off" style="margin-top: 10px;">
+            <input type="hidden" name="selected_profile_name" value="{html.escape(selected_profile_name)}" />
+            <div class="btn-row">
+              <button type="submit" name="action" value="apply_profile" {"disabled" if not selected_profile_name else ""}>应用到当前环境</button>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;color:var(--text-muted);">
+                <input type="checkbox" name="apply_set_default" />
+                <span>同时设为默认</span>
+              </label>
+            </div>
+          </form>
+
+          <details class="danger-area">
+            <summary style="color:#b91c1c;">危险操作（需确认）</summary>
+            <p class="section-note">以下操作不可撤销。请确认当前选中档案正确。</p>
+            <form method="post" action="/settings" autocomplete="off">
+              <input type="hidden" name="selected_profile_name" value="{html.escape(selected_profile_name)}" />
+              <div class="btn-row">
+                <button type="submit" name="action" value="overwrite_profile_from_env" class="danger-btn" {"disabled" if not selected_profile_name else ""}>用当前环境覆盖档案</button>
+                <button type="submit" name="action" value="delete_profile" class="danger-btn" {"disabled" if not selected_profile_name else ""} onclick="return confirm('确认删除该档案？此操作不可撤销。');">删除档案</button>
+                <button type="submit" name="action" value="clear_all_api_env" class="danger-btn" onclick="return confirm('确认清空当前全部 API 配置？');">清空当前环境 API</button>
+              </div>
+            </form>
+          </details>
+        </div>
+      </section>
+    </div>
   </div>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {{
+      var toast = document.querySelector(".toast");
+      if (toast) {{
+        setTimeout(function () {{
+          toast.style.opacity = "0";
+          toast.style.transition = "opacity .2s";
+          setTimeout(function () {{ toast.remove(); }}, 220);
+        }}, 3200);
+      }}
+
+      var clearButtons = document.querySelectorAll("[data-clear-field]");
+      clearButtons.forEach(function (btn) {{
+        btn.addEventListener("click", function () {{
+          var key = btn.getAttribute("data-clear-field");
+          if (!key) return;
+          var input = document.getElementById(key);
+          var marker = document.querySelector('[data-clear-target="' + key + '"]');
+          if (input) {{
+            input.value = "";
+            input.focus();
+          }}
+          if (marker) {{
+            marker.value = "1";
+          }}
+        }});
+      }});
+
+      var trackedInputs = document.querySelectorAll(".input-wrap input[type=text], .input-wrap input[type=password]");
+      trackedInputs.forEach(function (input) {{
+        input.addEventListener("input", function () {{
+          var key = input.getAttribute("id");
+          if (!key) return;
+          var marker = document.querySelector('[data-clear-target="' + key + '"]');
+          if (marker && input.value.trim()) {{
+            marker.value = "";
+          }}
+        }});
+      }});
+
+      var toggles = document.querySelectorAll("[data-toggle-visibility]");
+      toggles.forEach(function (btn) {{
+        btn.addEventListener("click", function () {{
+          var key = btn.getAttribute("data-toggle-visibility");
+          if (!key) return;
+          var input = document.getElementById(key);
+          if (!input) return;
+          input.type = input.type === "password" ? "text" : "password";
+        }});
+      }});
+
+      var copyButtons = document.querySelectorAll("[data-copy-field]");
+      copyButtons.forEach(function (btn) {{
+        btn.addEventListener("click", async function () {{
+          var key = btn.getAttribute("data-copy-field");
+          if (!key) return;
+          var input = document.getElementById(key);
+          if (!input) return;
+          try {{
+            await navigator.clipboard.writeText(input.value || "");
+            btn.textContent = "已复制";
+            setTimeout(function () {{ btn.textContent = "复制"; }}, 1200);
+          }} catch (err) {{
+            btn.textContent = "失败";
+            setTimeout(function () {{ btn.textContent = "复制"; }}, 1200);
+          }}
+        }});
+      }});
+    }});
+  </script>
 </body>
 </html>"""
 

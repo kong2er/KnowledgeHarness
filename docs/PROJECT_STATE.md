@@ -189,7 +189,8 @@ KnowledgeHarness/
   - **双视图**：`/` 对外使用视图（默认，隐藏测试/调试信息）与 `/lab` 调试视图（显示测试参数与诊断信息）
   - 调试视图默认禁用：仅 `KH_UI_ENABLE_LAB=1` 时可访问 `/lab`；首页入口还需 `KH_UI_SHOW_LAB_LINK=1`
   - **流程感知 Header（2026-04-21）**：主页标题旁展示 `API 状态` chip，读取 `KNOWLEDGEHARNESS_API_URL` / `TOPIC_CLASSIFIER_API_URL` / `WEB_ENRICHMENT_API_URL` 任一存在即显示"API 已配置"，否则显示"本地模式"；只显示 on/off 状态，**绝不回显任何 URL/Key 值**；点击跳转 `/settings`
-  - **完整 API 设置覆盖（2026-04-21）**：`/settings` 现分为"主设置"（`KNOWLEDGEHARNESS_API_URL/KEY`，默认展开）与"按模块覆盖"（`TOPIC_CLASSIFIER_API_URL/KEY/TEMPLATE` + `WEB_ENRICHMENT_API_URL/KEY/TEMPLATE`，默认折叠）；每个字段新增"清空此字段" checkbox，配合 `_write_env_pairs(clears=...)` 把 `.env` 对应行改写为 `KEY=` 形式（保留文件结构）并同步重置当前进程 `os.environ`
+  - **完整 API 设置覆盖（2026-04-21）**：`/settings` 现分为"主设置"（`KNOWLEDGEHARNESS_API_URL/KEY`）与"按模块覆盖"（`TOPIC_CLASSIFIER_API_URL/KEY/TEMPLATE` + `WEB_ENRICHMENT_API_URL/KEY/TEMPLATE`，默认折叠）；字段清空从独立 checkbox 收敛为输入框内联 clear（`×`）控制，提交时通过 `KEY__clear` 标记驱动 `_write_env_pairs(clears=...)` 把 `.env` 对应行改写为 `KEY=`（保留文件结构）并同步重置当前进程 `os.environ`
+  - **API 设置控制台紧凑化（2026-04-21）**：`/settings` 顶部改为全局状态栏（激活档案/档案数/模块就绪/环境状态），主体改为"基础配置 + 档案主从区"布局；支持密钥显隐（👁）、字段复制、全局 toast 反馈；危险操作聚合到选中档案详情内并带二次确认
   - **专业重设计（2026-04-21，纯视觉）**：统一 CSS token 配色（`--bg/--surface/--text/--accent` 等）、系统字体栈（CJK fallback）、一致圆角（10/6/999）、响应式断点（`max-width: 720px`）；功能未变
   - **进度反馈**：submit 时 inline JS 禁用按钮 + 顶部显示"处理中"状态条
   - **结果页**：对外视图仅展示最终笔记下载（MD / DOCX）与预览；调试视图额外展示摘要诊断与 JSON 下载
