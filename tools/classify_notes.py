@@ -11,8 +11,11 @@ Classification policy (acceptance baseline):
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from typing import Any, Dict, List, Tuple, Optional
+from urllib import parse, request
 
 CATEGORIES = [
     "basic_concepts",
@@ -73,11 +76,202 @@ LABEL_HINTS: Dict[str, List[str]] = {
 # Match a short "label" that precedes a Chinese or ASCII colon at chunk start,
 # tolerating leading markdown heading marks (# / ## / ...).
 _LABEL_RE = re.compile(r"^\s*#*\s*([^\s：:]{2,8})\s*[：:]")
+DEFAULT_API_TEMPLATE_PATH = (
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "config",
+        "api_payload_templates.json",
+    )
+)
 
 
 def _leading_label(text: str) -> str | None:
     match = _LABEL_RE.match(text or "")
     return match.group(1) if match else None
+
+
+def _load_classify_api_template() -> Dict[str, Any]:
+    template_path = os.getenv("CONTENT_CLASSIFIER_API_TEMPLATE", DEFAULT_API_TEMPLATE_PATH)
+    try:
+        with open(template_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        section = raw.get("content_classifier", {}) if isinstance(raw, dict) else {}
+        return section if isinstance(section, dict) else {}
+    except Exception:
+        return {}
+
+
+def _extract_json_object_from_text(content: str) -> Dict[str, Any]:
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("api returned empty text content")
+
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", text).strip()
+        text = re.sub(r"\n?```$", "", text).strip()
+
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        snippet = text[start : end + 1]
+        try:
+            data = json.loads(snippet)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    raise ValueError("api text content is not valid JSON object")
+
+
+def _resolve_api_style(url: str, module_style_key: str) -> str:
+    style = (
+        os.getenv(module_style_key, "").strip().lower()
+        or os.getenv("KNOWLEDGEHARNESS_API_STYLE", "").strip().lower()
+        or "auto"
+    )
+    if style in {"custom", "openai_compatible"}:
+        return style
+
+    parsed = parse.urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+    if "api.deepseek.com" in host or "api.openai.com" in host:
+        return "openai_compatible"
+    if path in {"", "/"}:
+        return "openai_compatible"
+    return "custom"
+
+
+def _resolve_openai_endpoint(url: str) -> str:
+    parsed = parse.urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/chat/completions"):
+        final_path = path
+    elif path.endswith("/v1"):
+        final_path = f"{path}/chat/completions"
+    elif path in {"", "/"}:
+        final_path = "/v1/chat/completions"
+    else:
+        final_path = f"{path}/chat/completions"
+    return parse.urlunparse(
+        (parsed.scheme, parsed.netloc, final_path, parsed.params, parsed.query, parsed.fragment)
+    )
+
+
+def _call_classification_api(
+    *,
+    text: str,
+    allowed_categories: List[str],
+    timeout_sec: float,
+) -> Dict[str, Any]:
+    url = (
+        os.getenv("CONTENT_CLASSIFIER_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
+    if not url:
+        raise RuntimeError("CONTENT_CLASSIFIER_API_URL is not configured")
+
+    api_template = _load_classify_api_template()
+    system_prompt = str(api_template.get("system_prompt") or "").strip()
+    output_contract = (
+        api_template.get("output_contract")
+        if isinstance(api_template.get("output_contract"), dict)
+        else {
+            "category": "string",
+            "confidence": "number between 0 and 1",
+            "reason": "short string",
+        }
+    )
+    payload = {
+        "text": text,
+        "allowed_categories": allowed_categories,
+        "system_prompt": system_prompt
+        or (
+            "You are a constrained content classifier. "
+            "Choose category only from allowed_categories."
+        ),
+        "output_contract": output_contract,
+        "rules": {
+            "must_choose_from_allowed_categories": True,
+            "fallback_category": "unclassified",
+        },
+    }
+
+    headers = {"Content-Type": "application/json"}
+    api_key = (
+        os.getenv("CONTENT_CLASSIFIER_API_KEY", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_KEY", "").strip()
+    )
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    style = _resolve_api_style(url, "CONTENT_CLASSIFIER_API_STYLE")
+    request_url = url
+    request_payload: Dict[str, Any]
+    if style == "openai_compatible":
+        request_url = _resolve_openai_endpoint(url)
+        model = (
+            os.getenv("CONTENT_CLASSIFIER_API_MODEL", "").strip()
+            or os.getenv("KNOWLEDGEHARNESS_API_MODEL", "").strip()
+            or "deepseek-chat"
+        )
+        request_payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": payload["system_prompt"]
+                    + " 只允许返回 JSON 对象，字段为 category/confidence/reason。",
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "text": payload["text"],
+                            "allowed_categories": payload["allowed_categories"],
+                            "rules": payload["rules"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+    else:
+        request_payload = payload
+
+    req = request.Request(
+        url=request_url,
+        method="POST",
+        data=json.dumps(request_payload).encode("utf-8"),
+        headers=headers,
+    )
+    with request.urlopen(req, timeout=timeout_sec) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+    data = json.loads(body)
+
+    if style == "openai_compatible":
+        choices = data.get("choices", []) if isinstance(data, dict) else []
+        if not choices:
+            raise ValueError("openai-compatible api returned empty choices")
+        content = str(((choices[0] or {}).get("message") or {}).get("content") or "")
+        data = _extract_json_object_from_text(content)
+
+    category = str(data.get("category") or "").strip()
+    confidence = float(data.get("confidence") or 0.0)
+    reason = str(data.get("reason") or f"api assisted ({style})")
+    if category not in allowed_categories:
+        raise ValueError(f"api returned out-of-scope category: {category}")
+    confidence = max(0.0, min(1.0, confidence))
+    return {"category": category, "confidence": confidence, "reason": reason}
 
 
 def _score_chunk(
@@ -151,6 +345,9 @@ def classify_notes(
     keywords: Optional[Dict[str, List[str]]] = None,
     label_hints: Optional[Dict[str, List[str]]] = None,
     category_priority: Optional[List[str]] = None,
+    api_assist_enabled: bool = False,
+    api_timeout_sec: float = 6.0,
+    api_retries: int = 1,
 ) -> Dict[str, Any]:
     """Classify chunks and produce review_needed for low-confidence items."""
     keywords = keywords or KEYWORDS
@@ -160,6 +357,14 @@ def classify_notes(
     categorized: Dict[str, List[Dict[str, Any]]] = {c: [] for c in CATEGORIES}
     review_needed: List[Dict[str, Any]] = []
     enriched_chunks: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    retries = max(0, int(api_retries))
+    api_configured = bool(
+        os.getenv("CONTENT_CLASSIFIER_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
+    if api_assist_enabled and not api_configured:
+        warnings.append("content classifier api 未配置，请接入API后使用")
 
     for chunk in chunks:
         text = chunk.get("chunk_text", "")
@@ -168,6 +373,39 @@ def classify_notes(
             scores,
             category_priority=category_priority,
         )
+        used_api = False
+        api_attempts = 0
+        fallback_state = "none"
+
+        should_try_api = bool(api_assist_enabled and (category == "unclassified" or confidence < 0.85))
+        if should_try_api and api_configured:
+            last_exc: Exception | None = None
+            for _ in range(retries + 1):
+                api_attempts += 1
+                try:
+                    api_out = _call_classification_api(
+                        text=text,
+                        allowed_categories=CATEGORIES,
+                        timeout_sec=api_timeout_sec,
+                    )
+                    api_category = str(api_out["category"])
+                    api_conf = float(api_out["confidence"])
+                    api_reason = str(api_out["reason"])
+                    # Use API result when it improves confidence or resolves unclassified.
+                    if (category == "unclassified" and api_category != "unclassified") or (api_conf >= confidence):
+                        category = api_category
+                        confidence = api_conf
+                        reason = f"{reason}; api refined: {api_reason}"
+                    used_api = True
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if not used_api and last_exc is not None:
+                fallback_state = "api_to_local"
+                warnings.append(
+                    f"content classify api fallback for {chunk.get('chunk_id')} after {api_attempts} attempt(s): {last_exc}"
+                )
 
         item = {
             **chunk,
@@ -175,6 +413,9 @@ def classify_notes(
             "confidence": round(confidence, 3),
             "classification_reason": reason,
             "keyword_scores": scores,
+            "used_api": used_api,
+            "api_attempts": api_attempts,
+            "fallback_state": fallback_state,
         }
         if category not in categorized:
             item["category"] = "unclassified"
@@ -199,6 +440,11 @@ def classify_notes(
         "chunks": enriched_chunks,
         "categorized": categorized,
         "review_needed": review_needed,
+        "warnings": warnings,
+        "stats": {
+            "chunk_count": len(chunks),
+            "used_api_count": sum(1 for x in enriched_chunks if x.get("used_api")),
+        },
     }
 
 

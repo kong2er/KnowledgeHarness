@@ -20,6 +20,7 @@ Authoritative acceptance source: `docs/ACCEPTANCE.md`.
 ## Required Pipeline Order
 
 1. Parse inputs
+   - images use local OCR first; when API assist is explicitly enabled and configured, image API OCR may be used as fallback/enhancement
 2. Chunk notes
 3. Topic coarse classify (document-level; constrained labels)
 4. Classify chunks (content-type)
@@ -69,8 +70,8 @@ For external resources (only when enrichment is actually implemented), each item
 ## Validation Policy
 
 The validator must flag:
-- `too_many_unclassified_chunks` (>35% of total chunks)
-- `empty_major_categories:<list>`
+- `too_many_unclassified_chunks`（`strict`: >35%；`lenient`: >60%）
+- `empty_major_categories:<list>`（`strict` 默认检查；`lenient` 在小样本下放宽）
 - `duplicated_chunks_detected`
 - `missing_stage_summaries:<list>`
 - `failed_sources_present:<count>`

@@ -62,8 +62,8 @@ def test_pipeline_request_parser() -> tuple[bool, str]:
     ok = parse({"inputs": ["samples/demo.md"]})
     if ok["output_dir"] != "outputs":
         return False, "default output_dir not applied"
-    if ok["topic_mode"] != "auto":
-        return False, "default topic_mode not applied"
+    if ok["topic_mode"] is not None:
+        return False, "default topic_mode should be None (inherit runtime config)"
 
     # Rejection paths.
     for bad, reason in [
@@ -96,6 +96,13 @@ def test_pipeline_request_parser() -> tuple[bool, str]:
     if coerced["enable_web_enrichment"] is not True:
         return False, "enable flag not coerced to bool"
 
+    parsed_bool = parse({"inputs": ["x"], "enable_api_assist": "false"})
+    if parsed_bool["enable_api_assist"] is not False:
+        return False, "string false should coerce to bool False"
+    parsed_profile = parse({"inputs": ["x"], "validation_profile": "lenient"})
+    if parsed_profile["validation_profile"] != "lenient":
+        return False, "validation_profile not preserved"
+
     return True, "PASS: parser accepts/rejects correctly"
 
 
@@ -118,6 +125,8 @@ def test_health_and_capabilities_endpoints() -> tuple[bool, str]:
         return False, f"/health payload unexpected: {body}"
     if "features" not in body or "topic_api_configured" not in body["features"]:
         return False, "/health missing feature flags"
+    if "image_ocr_api_configured" not in body["features"]:
+        return False, "/health missing image_ocr_api_configured flag"
 
     r = client.get("/pipeline/capabilities")
     if r.status_code != 200:

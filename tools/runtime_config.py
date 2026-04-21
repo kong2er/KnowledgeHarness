@@ -31,7 +31,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "api_retries": 1,
     },
     "api_assist": {"enabled_by_default": False},
-    "ocr": {"languages": "chi_sim+eng", "fallback_language": "eng"},
+    "ocr": {
+        "languages": "chi_sim+eng",
+        "fallback_language": "eng",
+        "api_timeout_sec": 8.0,
+        "api_retries": 1,
+        "api_enhance_mode": "auto",
+        "api_enhance_min_score": 40,
+        "api_enhance_ratio": 1.1,
+        "api_enhance_min_delta": 6,
+    },
+    "validation": {"profile": "strict"},
     "export": {"markdown_use_details": False},
 }
 

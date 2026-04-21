@@ -17,6 +17,7 @@ NOTE: This script is self-contained and does NOT require pytest.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -35,6 +36,7 @@ from tools.parse_inputs import (  # noqa: E402
     UNSUPPORTED_FILE_TYPE,
     parse_inputs,
 )
+import tools.parse_inputs as pi  # noqa: E402
 
 
 _passed = 0
@@ -232,6 +234,172 @@ def test_docx_heading_path_injected():
             _check("contains heading path marker", "heading_path:" in txt, txt[:160])
 
 
+def test_image_api_fallback_when_local_ocr_unavailable():
+    print("[test] image api fallback when local OCR unavailable")
+    old_probe = pi._probe_ocr_backend
+    old_urlopen = pi.request.urlopen
+    old_url = os.environ.get("IMAGE_OCR_API_URL")
+    old_style = os.environ.get("IMAGE_OCR_API_STYLE")
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"text": "这是图片 OCR API 提取文本"}).encode("utf-8")
+
+    try:
+        # Force local OCR to be unavailable, then ensure API fallback works.
+        pi._probe_ocr_backend = lambda: (False, "missing local ocr backend")
+        pi.request.urlopen = lambda req, timeout=0: FakeResp()
+        os.environ["IMAGE_OCR_API_URL"] = "http://fake.local/image-ocr"
+        os.environ["IMAGE_OCR_API_STYLE"] = "custom"
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "img.png"
+            p.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            result = parse_inputs([str(p)], api_assist_enabled=True)
+
+        docs = result["documents"]
+        _check("image parsed via api fallback", len(docs) == 1, str(result))
+        if docs:
+            _check(
+                "api text extracted",
+                "OCR API 提取文本" in docs[0].get("extracted_text", ""),
+                docs[0].get("extracted_text", ""),
+            )
+            _check(
+                "backend marked as image_api_ocr",
+                docs[0].get("extraction_backend") == "image_api_ocr",
+                str(docs[0]),
+            )
+        summary = result.get("ingestion_summary", {})
+        _check("image api attempted count", summary.get("image_api_attempted", 0) >= 1, str(summary))
+        _check("image api succeeded count", summary.get("image_api_succeeded", 0) == 1, str(summary))
+        _check("image api enhanced count", summary.get("image_api_enhanced", 0) == 0, str(summary))
+    finally:
+        pi._probe_ocr_backend = old_probe
+        pi.request.urlopen = old_urlopen
+        if old_url is None:
+            os.environ.pop("IMAGE_OCR_API_URL", None)
+        else:
+            os.environ["IMAGE_OCR_API_URL"] = old_url
+        if old_style is None:
+            os.environ.pop("IMAGE_OCR_API_STYLE", None)
+        else:
+            os.environ["IMAGE_OCR_API_STYLE"] = old_style
+
+
+def test_image_api_auto_enhance_replaces_low_quality_local():
+    print("[test] image api auto enhance replaces low quality local")
+    old_probe = pi._probe_ocr_backend
+    old_read_image = pi._read_image_file
+    old_call_api = pi._call_image_ocr_api
+    old_url = os.environ.get("IMAGE_OCR_API_URL")
+    old_style = os.environ.get("IMAGE_OCR_API_STYLE")
+    try:
+        pi._probe_ocr_backend = lambda: (True, "pytesseract")
+        pi._read_image_file = lambda *args, **kwargs: "abc"  # low score
+        pi._call_image_ocr_api = lambda *args, **kwargs: "这是 API 增强后的更完整图片文本内容"
+        os.environ["IMAGE_OCR_API_URL"] = "http://fake.local/image-ocr"
+        os.environ["IMAGE_OCR_API_STYLE"] = "custom"
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "img.png"
+            p.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            result = parse_inputs(
+                [str(p)],
+                api_assist_enabled=True,
+                image_api_enhance_mode="auto",
+                image_api_enhance_min_score=20,
+                image_api_enhance_ratio=1.05,
+                image_api_enhance_min_delta=2,
+            )
+        docs = result["documents"]
+        _check("image parsed", len(docs) == 1, str(result))
+        if docs:
+            _check("api used", docs[0].get("image_api_used") is True, str(docs[0]))
+            _check(
+                "backend enhanced tag",
+                docs[0].get("extraction_backend") == "image_api_ocr_enhanced",
+                str(docs[0]),
+            )
+            _check("enhanced flag", docs[0].get("image_api_enhanced") is True, str(docs[0]))
+        summary = result.get("ingestion_summary", {})
+        _check("attempted>=1", summary.get("image_api_attempted", 0) >= 1, str(summary))
+        _check("succeeded=1", summary.get("image_api_succeeded", 0) == 1, str(summary))
+        _check("enhanced=1", summary.get("image_api_enhanced", 0) == 1, str(summary))
+    finally:
+        pi._probe_ocr_backend = old_probe
+        pi._read_image_file = old_read_image
+        pi._call_image_ocr_api = old_call_api
+        if old_url is None:
+            os.environ.pop("IMAGE_OCR_API_URL", None)
+        else:
+            os.environ["IMAGE_OCR_API_URL"] = old_url
+        if old_style is None:
+            os.environ.pop("IMAGE_OCR_API_STYLE", None)
+        else:
+            os.environ["IMAGE_OCR_API_STYLE"] = old_style
+
+
+def test_image_api_auto_enhance_keeps_better_local_text():
+    print("[test] image api auto enhance keeps better local text")
+    old_probe = pi._probe_ocr_backend
+    old_read_image = pi._read_image_file
+    old_call_api = pi._call_image_ocr_api
+    old_url = os.environ.get("IMAGE_OCR_API_URL")
+    old_style = os.environ.get("IMAGE_OCR_API_STYLE")
+    try:
+        pi._probe_ocr_backend = lambda: (True, "pytesseract")
+        pi._read_image_file = (
+            lambda *args, **kwargs: "本地 OCR 已经提取到了足够详细且可读的文本内容用于学习整理"
+        )
+        pi._call_image_ocr_api = lambda *args, **kwargs: "短文本"
+        os.environ["IMAGE_OCR_API_URL"] = "http://fake.local/image-ocr"
+        os.environ["IMAGE_OCR_API_STYLE"] = "custom"
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "img.png"
+            p.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            result = parse_inputs(
+                [str(p)],
+                api_assist_enabled=True,
+                image_api_enhance_mode="auto",
+                image_api_enhance_min_score=999,  # force API attempt for comparison
+                image_api_enhance_ratio=1.2,
+                image_api_enhance_min_delta=10,
+            )
+        docs = result["documents"]
+        _check("image parsed", len(docs) == 1, str(result))
+        if docs:
+            _check("keep local backend", docs[0].get("extraction_backend") == "pytesseract", str(docs[0]))
+            _check("api not used", docs[0].get("image_api_used") is False, str(docs[0]))
+            _check(
+                "local text preserved",
+                "本地 OCR 已经提取" in docs[0].get("extracted_text", ""),
+                docs[0].get("extracted_text", ""),
+            )
+        summary = result.get("ingestion_summary", {})
+        _check("attempted>=1", summary.get("image_api_attempted", 0) >= 1, str(summary))
+        _check("succeeded=0", summary.get("image_api_succeeded", 0) == 0, str(summary))
+    finally:
+        pi._probe_ocr_backend = old_probe
+        pi._read_image_file = old_read_image
+        pi._call_image_ocr_api = old_call_api
+        if old_url is None:
+            os.environ.pop("IMAGE_OCR_API_URL", None)
+        else:
+            os.environ["IMAGE_OCR_API_URL"] = old_url
+        if old_style is None:
+            os.environ.pop("IMAGE_OCR_API_STYLE", None)
+        else:
+            os.environ["IMAGE_OCR_API_STYLE"] = old_style
+
+
 def main():
     print("=" * 60)
     print("Input Expansion + Ingestion Notice: minimal tests")
@@ -245,6 +413,9 @@ def main():
     test_notifier_event_stream()
     test_pdf_encrypted_fails_gracefully()
     test_docx_heading_path_injected()
+    test_image_api_fallback_when_local_ocr_unavailable()
+    test_image_api_auto_enhance_replaces_low_quality_local()
+    test_image_api_auto_enhance_keeps_better_local_text()
     print("-" * 60)
     print(f"Result: {_passed} passed, {_failed} failed")
     sys.exit(0 if _failed == 0 else 1)

@@ -5,8 +5,29 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+VALIDATION_PROFILES: Dict[str, Dict[str, float]] = {
+    "strict": {
+        "unclassified_ratio_warn": 0.35,
+        "empty_major_min_total_chunks": 1.0,
+        "empty_major_warn_missing_count": 1.0,
+    },
+    "lenient": {
+        # Small/OCR-heavy inputs often produce sparse category coverage.
+        # Lenient profile raises the warning threshold to reduce false invalid.
+        "unclassified_ratio_warn": 0.60,
+        "empty_major_min_total_chunks": 6.0,
+        "empty_major_warn_missing_count": 3.0,
+    },
+}
+
+
 def _normalize(text: str) -> str:
     return " ".join((text or "").split()).strip().lower()
+
+
+def _resolve_profile(profile: str | None) -> str:
+    p = (profile or "strict").strip().lower()
+    return p if p in VALIDATION_PROFILES else "strict"
 
 
 def validate_result(
@@ -17,6 +38,7 @@ def validate_result(
     web_resources: Optional[List[Dict[str, Any]]] = None,
     web_enrichment_enabled: bool = False,
     semantic_conflicts: Optional[List[Dict[str, Any]]] = None,
+    validation_profile: str = "strict",
 ) -> Dict[str, Any]:
     """Validate classification and summary completeness.
 
@@ -36,6 +58,8 @@ def validate_result(
     empty_sources = empty_sources or []
     web_resources = web_resources or []
     semantic_conflicts = semantic_conflicts or []
+    profile_key = _resolve_profile(validation_profile)
+    policy = VALIDATION_PROFILES[profile_key]
 
     categorized = classification_output.get("categorized", {})
     all_chunks = classification_output.get("chunks", [])
@@ -47,8 +71,10 @@ def validate_result(
     unclassified_count = len(categorized.get("unclassified", []))
     stats["total_chunks"] = total
     stats["unclassified_chunks"] = unclassified_count
+    stats["validation_profile"] = profile_key
 
-    if total > 0 and (unclassified_count / total) > 0.35:
+    unclassified_ratio_warn = float(policy.get("unclassified_ratio_warn", 0.35))
+    if total > 0 and (unclassified_count / total) > unclassified_ratio_warn:
         warnings.append("too_many_unclassified_chunks")
 
     empty_major_categories = [
@@ -61,7 +87,12 @@ def validate_result(
         ]
         if len(categorized.get(c, [])) == 0
     ]
-    if empty_major_categories:
+    empty_major_min_total = int(policy.get("empty_major_min_total_chunks", 1))
+    empty_major_warn_missing = int(policy.get("empty_major_warn_missing_count", 1))
+    if (
+        total >= empty_major_min_total
+        and len(empty_major_categories) >= empty_major_warn_missing
+    ):
         warnings.append(f"empty_major_categories:{','.join(empty_major_categories)}")
 
     seen: Dict[str, str] = {}

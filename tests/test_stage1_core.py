@@ -97,6 +97,46 @@ def test_validate_warnings():
     _check("failed_sources warning", "failed_sources_present:1" in warnings, str(warnings))
 
 
+def test_validate_lenient_profile_relaxes_sparse_input():
+    print("[test] validate lenient profile")
+    classification_output = {
+        "chunks": [
+            {"chunk_id": "1", "chunk_text": "概念文本"},
+            {"chunk_id": "2", "chunk_text": "噪声文本"},
+        ],
+        "categorized": {
+            "basic_concepts": [{"chunk_id": "1"}],
+            "methods_and_processes": [],
+            "examples_and_applications": [],
+            "difficult_or_error_prone_points": [],
+            "extended_reading": [],
+            "unclassified": [{"chunk_id": "2"}],
+        },
+    }
+    out = validate_result(
+        classification_output,
+        stage_summaries={
+            "stage_1": {"summary": "ok"},
+            "stage_2": {"summary": "ok"},
+            "stage_3": {"must_remember": [], "high_priority": [], "easy_to_confuse": [], "next_reading": []},
+        },
+        validation_profile="lenient",
+    )
+    warnings = out["warnings"]
+    _check(
+        "lenient suppresses unclassified ratio warning",
+        "too_many_unclassified_chunks" not in warnings,
+        str(warnings),
+    )
+    _check(
+        "lenient suppresses empty major warning on tiny sample",
+        not any(w.startswith("empty_major_categories:") for w in warnings),
+        str(warnings),
+    )
+    stats = out.get("stats", {})
+    _check("profile recorded", stats.get("validation_profile") == "lenient", str(stats))
+
+
 def test_export_contains_topic_section():
     print("[test] export includes topic section")
     result = {
@@ -169,6 +209,7 @@ def main():
     test_chunk_hard_split()
     test_classify_tie_and_review_needed()
     test_validate_warnings()
+    test_validate_lenient_profile_relaxes_sparse_input()
     test_export_contains_topic_section()
     test_run_pipeline_regressions()
     test_keypoint_min_confidence_filter()

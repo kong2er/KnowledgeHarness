@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app import run_pipeline  # noqa: E402
+from tools.pipeline_runtime import build_pipeline_run_kwargs  # noqa: E402
 from tools.runtime_config import load_runtime_config  # noqa: E402
 from tools.export_notes import export_notes  # noqa: E402
 
@@ -86,6 +87,16 @@ def test_run_pipeline_keypoint_max_points():
     _check("points capped", len(points) <= 2, str(points))
 
 
+def test_validation_profile_runtime_resolve():
+    print("[test] validation profile runtime resolve")
+    kwargs, meta = build_pipeline_run_kwargs(
+        config_path="config/pipeline_config.json",
+        validation_profile="lenient",
+    )
+    _check("run kwargs carry profile", kwargs.get("validation_profile") == "lenient", str(kwargs))
+    _check("meta carries profile", meta.get("validation_profile") == "lenient", str(meta))
+
+
 def main():
     print("=" * 60)
     print("Phase-3 non-API tests")
@@ -93,6 +104,7 @@ def main():
     test_runtime_config_merge()
     test_markdown_details_export()
     test_run_pipeline_keypoint_max_points()
+    test_validation_profile_runtime_resolve()
     print("-" * 60)
     print(f"Result: {_passed} passed, {_failed} failed")
     sys.exit(0 if _failed == 0 else 1)

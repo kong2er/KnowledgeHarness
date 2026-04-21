@@ -13,12 +13,12 @@
 
 | 分层 | 说明 |
 |------|------|
-| 输入 | `.txt / .md / .pdf / .docx` 默认可用；图片 `.png/.jpg/.jpeg` 为 **opt-in OCR**（需额外安装，否则降级为 `ocr_backend_unavailable`） |
-| 分类 | 文档级主题粗分类（本地 taxonomy 约束，支持可选 API 协助 + 失败降级）+ chunk 级内容分类（关键词规则 + 起始标签双路打分） |
-| 摘要 | 三阶段总结（Stage 1/2/3）+ 基于置信度与类别优先级的重点提炼 |
+| 输入 | `.txt / .md / .pdf / .docx` 默认可用；图片 `.png/.jpg/.jpeg` 为 **opt-in OCR**（本地依赖可用时走 tesseract；显式开启 API 协助且已配置时支持图片 API OCR 增强与自动择优） |
+| 分类 | 文档级主题粗分类（本地 taxonomy 约束，支持可选 API 协助 + 失败降级）+ chunk 级内容分类（本地规则 + 可选 API 协助低置信度补判） |
+| 摘要 | 三阶段总结（Stage 1/2/3，Stage 3 支持可选 API 协助整理）+ 基于置信度与类别优先级的重点提炼 |
 | 校验 | 未分类比例、重复、阶段缺失、失败源、语义冲突（启发式）、web 资源字段缺失 |
 | 导出 | `result.json` + `result.md`（最终笔记版 / 完整报告版可切换）+ 可选 `result.docx` |
-| 服务层 | FastAPI + Flask 最小入口 + 本地 Web UI（stdlib 零依赖，含文件池、四重上传限额、masked API 设置、多 API 档案选择、路径遍历防御） |
+| 服务层 | FastAPI + Flask 最小入口 + 本地 Web UI（stdlib 零依赖，含双栏信息架构、文件池、四重上传限额、masked API 设置、多 API 档案选择、路径遍历防御） |
 
 ## 快速开始
 
@@ -41,6 +41,8 @@ python3 app.py samples/ --output-dir outputs
 # 本地 Web UI（零第三方依赖，自动打开浏览器）
 python3 launch_app.py
 # 或：./start_ui.sh（Linux/macOS）/ start_ui.bat（Windows）
+# 也可直接：python3 service/simple_ui.py --host 127.0.0.1 --port 8765
+# （端口占用时会自动回退到后续可用端口，并打印实际地址）
 # 调试视图 /lab 默认禁用；如需启用：
 # KH_UI_ENABLE_LAB=1 python3 launch_app.py
 # （若还要在首页显示入口，再加 KH_UI_SHOW_LAB_LINK=1）
@@ -61,6 +63,7 @@ python3 service/flask_server.py --port 8001
 --topic-mode auto|local|api      # 主题粗分类模式（默认 auto，API 失败自动降级）
 --enable-web-enrichment          # 启用可开关的 web enrichment
 --web-enrichment-api-retries <n> # Web API 可恢复错误重试次数
+--validation-profile strict|lenient # 校验策略（默认 strict）
 --enable-api-assist              # 显式开启可选 API 协助（默认关闭）
 --export-docx                    # 额外导出 result.docx
 --full-report                    # 完整报告版（默认是纯笔记版）
@@ -73,7 +76,7 @@ python3 service/flask_server.py --port 8001
 | 能力 | 如何启用 |
 |------|---------|
 | 图片 OCR | `pip install -r requirements-ocr.txt` + 系统装 `tesseract-ocr`（或直接用 `Dockerfile`） |
-| API 协助（主题 / web enrichment） | `cp .env.example .env` 并填入 `KNOWLEDGEHARNESS_API_URL`，详见 `docs/API_SETUP.md` |
+| API 协助（主题 / 分类 / 整理 / 图片OCR / web enrichment） | `cp .env.example .env` 并填入 `KNOWLEDGEHARNESS_API_URL`，详见 `docs/API_SETUP.md` |
 | 桌面可执行文件 | `pip install -r requirements-desktop.txt && python3 scripts/build_desktop.py` |
 | Docker（OCR-ready） | `docker build -t knowledgeharness . && docker run --rm -v "$PWD/samples:/data" knowledgeharness python app.py /data/demo.md --output-dir /data/out` |
 
@@ -88,6 +91,10 @@ python3 service/flask_server.py --port 8001
 | `docs/ENGINEERING_REVIEW.md` | 全局工程审计快照（能力覆盖 / 缺陷 / 优化路线） |
 | `docs/HANDOFF.md` | 当前版本交接结论 |
 | `docs/API_SETUP.md` | API 接入最小说明 |
+| `docs/UI_LAYOUT_SPEC.md` | UI 布局与按钮层级规范（左操作/右状态结果） |
+| `docs/AGENT_A_UI_CONTRACT.md` | Agent A：输入区字段、文件状态、错误映射 |
+| `docs/AGENT_B_UI_INFORMATION_ARCHITECTURE.md` | Agent B：状态区与结果区信息架构 |
+| `docs/AGENT_C_UI_USABILITY_ACCEPTANCE.md` | Agent C：UI 可用性验收与最小回归 |
 | `docs/TODO.md` | 未完成事项与优化路线（按优先级维护） |
 | `.codex/session_rules.md` | 会话级前置门禁 |
 
@@ -96,7 +103,7 @@ python3 service/flask_server.py --port 8001
 ## 测试
 
 ```bash
-# 7 份 stdlib 测试脚本（不依赖 pytest），含可选依赖的 SKIP 语义
+# 9 份 stdlib 测试脚本（不依赖 pytest），含可选依赖的 SKIP 语义
 for t in tests/test_*.py; do python3 "$t"; done
 
 # 一键跑通验收门禁（测试 + demo smoke + result 结构检查）

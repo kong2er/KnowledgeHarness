@@ -1,6 +1,6 @@
 # ENGINEERING REVIEW
 
-Last Updated: 2026-04-21
+Last Updated: 2026-04-22
 
 ## 1) Scope and Goal
 
@@ -18,7 +18,7 @@ It is written in Harness Engineering style: state first, then gaps, then executa
 | Layer | Status | Notes |
 |------|--------|------|
 | Input parsing (`txt/md/pdf/docx`) | Implemented | with structured failure semantics |
-| Image ingestion (`png/jpg/jpeg`) | Implemented (opt-in OCR) | true OCR requires `pytesseract + Pillow + tesseract` |
+| Image ingestion (`png/jpg/jpeg`) | Implemented (opt-in OCR + optional API OCR assist) | local OCR preferred; API OCR supports `fallback_only/auto/prefer_api` and can auto-select better result |
 | Chunking | Implemented | paragraph -> sentence -> char fallback |
 | Topic coarse classification | Implemented | document-level, constrained taxonomy, optional API assist |
 | Content-type classification | Implemented | chunk-level rules + tie-break priority + review queue |
@@ -26,7 +26,7 @@ It is written in Harness Engineering style: state first, then gaps, then executa
 | Key points extraction | Implemented | category priority + confidence threshold + max cap |
 | Web enrichment | Implemented | `off/local/api/auto`, failure-tolerant fallback |
 | Semantic conflict detection | Implemented (heuristic) | rule-based, not NLI/embedding |
-| Validation | Implemented | warning-based, strict by default |
+| Validation | Implemented | warning-based; supports `strict/lenient` profile |
 | Export (`json/md/docx`) | Implemented | final-notes mode + full-report mode |
 | Local Web UI | Implemented | stdlib-only, upload pool, settings console, safety checks |
 | FastAPI/Flask service entry | Implemented | minimal wrappers, same core pipeline |
@@ -34,7 +34,7 @@ It is written in Harness Engineering style: state first, then gaps, then executa
 
 ## 3) Verified Quality Snapshot
 
-Audit commands executed on 2026-04-21:
+Audit commands executed on 2026-04-22:
 
 ```bash
 for t in tests/test_*.py; do python3 "$t"; done
@@ -46,7 +46,7 @@ python3 app.py samples/ --output-dir outputs/audit_mix --quiet
 
 Test baseline:
 
-- `tests/test_*.py`: 7 scripts, 82 passed (including optional-dependency SKIP semantics)
+- `tests/test_*.py`: 9 scripts（含 `test_simple_ui.py`；可选依赖/受限环境按 SKIP 语义）
 
 Observed results:
 
@@ -60,15 +60,13 @@ Observed results:
 Interpretation:
 
 - pipeline stability is good (no crashes, outputs complete)
-- strict validation can mark sparse inputs as invalid even when extraction and summarization succeed
+- sparse/OCR 场景可通过 `validation_profile=lenient` 降低误报
 
 ## 4) Known Defects and Constraints
 
 | ID | Item | Type | Impact | Suggested Direction |
 |----|------|------|--------|---------------------|
-| D-01 | Validation strictness for sparse/OCR documents | behavior gap | raises false-negative validity for small but useful notes | add `validation_profile` (`strict/lenient`) and context-aware thresholds |
 | D-02 | UI download endpoint only serves `outputs/` root files | UX constraint | subdirectory outputs require manual file browsing | add optional safe subpath tokenized download flow |
-| D-03 | UI HTTP layer lacks automated tests | test gap | regressions may slip in UI request parsing/safety checks | add `tests/test_simple_ui.py` (multipart, limits, download guard, settings masking) |
 | D-04 | Rule dictionaries/taxonomy coverage is manual | quality ceiling | more `unclassified` / `unknown_topic` on domain-shifted notes | build iterative tuning workflow from real corpora stats |
 | D-05 | Binary package in repo history | repo hygiene risk | repo growth and slower clone history | move artifacts to GitHub Releases in a future delivery policy |
 
@@ -76,9 +74,7 @@ Interpretation:
 
 ### P0 (next hardening cycle)
 
-1. Validation profile and threshold policy.
-2. UI HTTP automation for safety-critical routes.
-3. Real API integration acceptance (external endpoint ready).
+1. Real API integration acceptance (external endpoint ready).
 
 ### P1 (quality and maintainability)
 

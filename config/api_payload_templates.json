@@ -7,6 +7,29 @@
       "reason": "short string"
     }
   },
+  "content_classifier": {
+    "system_prompt": "你是受约束的内容功能分类器。你只能从 allowed_categories 中选择 category，不能发明新类别。不确定时返回 unclassified。请给出 0~1 的 confidence，并给出简短 reason。",
+    "output_contract": {
+      "category": "string (must be one of allowed_categories)",
+      "confidence": "number between 0 and 1",
+      "reason": "short string"
+    }
+  },
+  "notes_organizer": {
+    "system_prompt": "你是受约束的学习笔记整理器。仅可基于输入内容重组，不得虚构新事实。必须返回固定 JSON 结构：must_remember_concepts / high_priority_points / easy_to_confuse_points / next_reading_directions。",
+    "output_contract": {
+      "must_remember_concepts": "string[]",
+      "high_priority_points": "string[]",
+      "easy_to_confuse_points": "string[]",
+      "next_reading_directions": "string[]"
+    }
+  },
+  "image_ocr": {
+    "system_prompt": "你是受约束的 OCR 文本提取器。请尽量完整提取图片中的文字，保持原始语言，不要编造不存在的文本。返回 JSON 对象，字段为 text。",
+    "output_contract": {
+      "text": "string"
+    }
+  },
   "web_enrichment": {
     "system_prompt": "你是受约束的补充资源提取器。你只能返回与用户资料相关的补充条目，不得覆盖用户原文结论。每条必须包含 title/url/purpose/relevance_reason。",
     "output_contract": {

@@ -1,4 +1,19 @@
 {
-  "active_profile": "",
-  "profiles": []
+  "active_profile": "deepseek",
+  "profiles": [
+    {
+      "name": "deepseek",
+      "KNOWLEDGEHARNESS_API_URL": "https://api.deepseek.com",
+      "KNOWLEDGEHARNESS_API_KEY": "sk-2002eb6bb01e4a8ea5d74b8bde9f8dd7",
+      "TOPIC_CLASSIFIER_API_URL": "",
+      "TOPIC_CLASSIFIER_API_KEY": "",
+      "TOPIC_CLASSIFIER_API_TEMPLATE": "",
+      "IMAGE_OCR_API_URL": "",
+      "IMAGE_OCR_API_KEY": "",
+      "IMAGE_OCR_API_TEMPLATE": "",
+      "WEB_ENRICHMENT_API_URL": "",
+      "WEB_ENRICHMENT_API_KEY": "",
+      "WEB_ENRICHMENT_API_TEMPLATE": ""
+    }
+  ]
 }

@@ -17,10 +17,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app import run_pipeline  # noqa: E402
+from tools.classify_notes import classify_notes  # noqa: E402
 from tools.detect_semantic_conflicts import detect_semantic_conflicts  # noqa: E402
+from tools.stage_summarize import stage_summarize  # noqa: E402
 from tools.topic_coarse_classify import topic_coarse_classify  # noqa: E402
 from tools.validate_result import validate_result  # noqa: E402
 from tools.web_enrichment import web_enrich  # noqa: E402
+import tools.classify_notes as cn  # noqa: E402
+import tools.stage_summarize as ss  # noqa: E402
 import tools.topic_coarse_classify as tc  # noqa: E402
 import tools.web_enrichment as we  # noqa: E402
 
@@ -258,6 +262,103 @@ def test_api_assist_disabled_keeps_local_mode():
     )
 
 
+def test_content_classify_api_refines_unclassified():
+    print("[test] content classify api refine")
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "category": "basic_concepts",
+                    "confidence": 0.92,
+                    "reason": "api refine",
+                }
+            ).encode("utf-8")
+
+    old_urlopen = cn.request.urlopen
+    old_url = os.environ.get("CONTENT_CLASSIFIER_API_URL")
+    os.environ["CONTENT_CLASSIFIER_API_URL"] = "http://fake.local/classify"
+    cn.request.urlopen = lambda req, timeout=0: FakeResp()
+    try:
+        out = classify_notes(
+            [
+                {
+                    "chunk_id": "001",
+                    "source_name": "x.md",
+                    "source_type": "md",
+                    "source_path": "/tmp/x.md",
+                    "chunk_text": "%%#@ OCR 噪声片段",
+                }
+            ],
+            api_assist_enabled=True,
+        )
+    finally:
+        cn.request.urlopen = old_urlopen
+        if old_url is None:
+            os.environ.pop("CONTENT_CLASSIFIER_API_URL", None)
+        else:
+            os.environ["CONTENT_CLASSIFIER_API_URL"] = old_url
+
+    item = out["chunks"][0]
+    _check("api used", item.get("used_api") is True, str(item))
+    _check("refined category", item.get("category") == "basic_concepts", str(item))
+
+
+def test_stage_summarize_api_refines_stage3():
+    print("[test] stage summarize api refine")
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "must_remember_concepts": ["监督学习是从标注数据学习映射。"],
+                    "high_priority_points": ["先清洗，再划分训练/测试，再训练评估。"],
+                    "easy_to_confuse_points": ["训练集泄漏会虚高指标。"],
+                    "next_reading_directions": ["https://scikit-learn.org/stable/"],
+                }
+            ).encode("utf-8")
+
+    old_urlopen = ss.request.urlopen
+    old_url = os.environ.get("NOTES_ORGANIZER_API_URL")
+    os.environ["NOTES_ORGANIZER_API_URL"] = "http://fake.local/organize"
+    ss.request.urlopen = lambda req, timeout=0: FakeResp()
+    try:
+        out = stage_summarize(
+            [{"source_name": "x.md"}],
+            {
+                "basic_concepts": [{"chunk_text": "概念：监督学习"}],
+                "methods_and_processes": [{"chunk_text": "方法：先清洗再训练"}],
+                "examples_and_applications": [],
+                "difficult_or_error_prone_points": [{"chunk_text": "易错点：泄漏"}],
+                "extended_reading": [{"chunk_text": "https://scikit-learn.org/stable/"}],
+                "unclassified": [],
+            },
+            api_assist_enabled=True,
+        )
+    finally:
+        ss.request.urlopen = old_urlopen
+        if old_url is None:
+            os.environ.pop("NOTES_ORGANIZER_API_URL", None)
+        else:
+            os.environ["NOTES_ORGANIZER_API_URL"] = old_url
+
+    s3 = out.get("stage_3", {})
+    _check("stage3 api used", s3.get("used_api") is True, str(s3))
+    _check("stage3 concepts filled", len(s3.get("must_remember_concepts", [])) >= 1, str(s3))
+
+
 def main():
     print("=" * 60)
     print("Phase-2 feature tests")
@@ -268,6 +369,8 @@ def main():
     test_topic_api_retries()
     test_api_assist_explicitly_enables_web_enrichment()
     test_api_assist_disabled_keeps_local_mode()
+    test_content_classify_api_refines_unclassified()
+    test_stage_summarize_api_refines_stage3()
     print("-" * 60)
     print(f"Result: {_passed} passed, {_failed} failed")
     sys.exit(0 if _failed == 0 else 1)

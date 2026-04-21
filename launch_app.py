@@ -11,7 +11,8 @@ import threading
 import time
 import webbrowser
 
-from service.simple_ui import _load_local_env, create_server
+from service.simple_ui import create_server
+from tools.pipeline_runtime import load_local_env
 
 
 def _find_free_port(host: str, start_port: int, max_tries: int = 30) -> int:
@@ -39,7 +40,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    _load_local_env(".env")
+    load_local_env(".env")
     host = args.host
     port = _find_free_port(host, int(args.port))
 

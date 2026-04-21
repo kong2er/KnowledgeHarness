@@ -1,14 +1,14 @@
 # TODO
 
-Last Updated: 2026-04-21
+Last Updated: 2026-04-22
 
 ## 仍未完成（P0 / P1 / P2）
 
 ### P0（稳定性与验收优先）
 
 - [ ] **API 接口联调** — 阻塞在外部：代码侧 schema / fallback / 越界拒绝 / 重试 / masked 密钥管理已就位，待真实 endpoint 与鉴权策略落地后完成联调验收。
-- [ ] **Validation 策略分级** — 为小样本/OCR 场景提供 `strict/lenient` 可配置校验策略，降低“可用但被判 invalid”的误报。
-- [ ] **UI HTTP 自动化测试** — 固化当前手工 smoke 场景，覆盖上传限额、下载白名单、settings 密钥不回显、错误分级。
+- [x] **Validation 策略分级** — 已支持 `strict/lenient` 可配置校验策略，降低小样本/OCR 场景误报。
+- [x] **UI HTTP 自动化测试** — 已新增 `tests/test_simple_ui.py` 覆盖上传限额、下载白名单、settings 密钥不回显、错误分级（受限环境按 SKIP 语义执行）。
 
 ### P1（质量与可维护性）
 
@@ -34,6 +34,63 @@ Last Updated: 2026-04-21
 ---
 
 ## Changelog（按里程碑）
+
+### 2026-04-22 · UI 布局与按键可用性重构（仅已有功能）
+
+- [x] `service/simple_ui.py` 主页面改为“左操作区 / 右状态与结果区”双栏结构（移动端自动单栏）
+- [x] 按钮层级重构：一级主按钮（开始整理）与二/三级动作分层
+- [x] 文件导入增强：新增“选择文件夹”入口，保留“选择文件”与历史文件池复用
+- [x] 右栏状态区固定展示：阶段、成功/失败/空文本/处理文件数、告警与 notes
+- [x] 结果闭环增强：新增“打开输出目录”（`/outputs` 页面）与“打开结果文件”动作
+- [x] 新增 UI/Agent 专用文档：`UI_LAYOUT_SPEC` + `AGENT_A/B/C_UI_*`
+- [x] 回归检查：`python3 -m py_compile service/simple_ui.py` 通过；`tests/test_simple_ui.py`、`tests/test_ui_server_port_fallback.py` 在受限环境按 SKIP 语义执行
+
+### 2026-04-22 · 图片 API OCR 增强策略 + UI 交互优化（不扩范围）
+
+- [x] `parse_inputs` 图片链路支持 `fallback_only / auto / prefer_api` 三档 API 协助策略
+- [x] `auto` 策略下支持“本地 OCR 与 API OCR 择优覆盖”，并新增 `image_api_enhanced` 统计
+- [x] `ingestion_summary` 增补 `image_api_enhance_mode / image_api_enhanced`
+- [x] 运行时配置补齐 OCR 增强参数：`config/pipeline_config.json` + `tools/runtime_config.py`
+- [x] UI 优化：运行页新增 `validation_profile` 选择、图片增强策略提示、摘要卡展示图片 API 尝试/生效/增强统计
+- [x] API 设置页模块就绪计数修正为 `3`（Topic / Image OCR / Web Enrichment）
+- [x] 回归测试：`tests/test_parse_inputs.py` 新增“自动增强择优覆盖/保留本地更优结果”用例
+
+### 2026-04-22 · 未完成项收尾（Validation + UI HTTP 测试）
+
+- [x] `tools/validate_result.py` 增加 `validation_profile`（`strict/lenient`）策略分级
+- [x] `config/pipeline_config.json` + `tools/runtime_config.py` 新增 `validation.profile` 运行时配置
+- [x] CLI/FastAPI/Flask 入口新增 `validation_profile` 参数透传（经 `build_pipeline_run_kwargs` 统一解析）
+- [x] 新增 `tests/test_simple_ui.py`：覆盖 settings 密钥不回显、下载白名单、输入类 400、流水线异常 500、图片数量上限
+- [x] 相关回归：`tests/test_stage1_core.py` / `tests/test_phase3_non_api.py` 增补 validation profile 断言
+
+### 2026-04-22 · 运行结构一致性优化（不扩功能）
+
+- [x] 新增 `tools/pipeline_runtime.py`：统一 `.env` 加载、API 配置探针、`run_pipeline` 参数解析
+- [x] CLI/FastAPI/Flask/UI 全入口改为共享参数解析层，修复“入口默认值策略漂移”风险
+- [x] Flask 请求解析强化：布尔字符串显式解析（`"false"` 不再被误判为 True）
+- [x] `tests/test_flask_service_entry.py` 增加配置继承与布尔解析回归断言
+
+### 2026-04-22 · UI 端口占用修复（不扩功能）
+
+- [x] 修复 `python3 service/simple_ui.py --port 8765` 在端口占用时报错退出的问题：改为自动回退后续可用端口
+- [x] `service/simple_ui.py` 新增 `--max-port-tries` 参数，控制端口回退尝试范围
+- [x] `launch_app.py` 环境加载改为复用 `tools/pipeline_runtime.load_local_env`（修复旧符号引用风险）
+- [x] 新增 `tests/test_ui_server_port_fallback.py` 回归测试（受限环境按 SKIP 语义执行）
+
+### 2026-04-22 · API 协助范围补齐（分类 + 整理）
+
+- [x] `tools/classify_notes.py` 增加受约束 API 协助（仅低置信度/未分类 chunk 触发；标签边界仍是 `CATEGORIES`）
+- [x] `tools/stage_summarize.py` 增加 Stage 3 可选 API 协助整理（固定结构 + 失败降级）
+- [x] `app.py` 接入并将新 warnings 写入 `pipeline_notes`
+- [x] 更新 `config/api_payload_templates.json`、`.env.example`、`docs/API_SETUP.md`
+- [x] 新增回归：`tests/test_phase2_features.py` 覆盖分类 API 补判与 Stage 3 API 整理
+
+### 2026-04-22 · 图片读取增强（API OCR 可选补偿）
+
+- [x] `tools/parse_inputs.py` 增加图片读取链路：本地 OCR 优先，API 协助开启时可走图片 API OCR 补偿
+- [x] 新增图片 API OCR 配置项与模板：`.env.example` + `config/api_payload_templates.json`
+- [x] `app.py`/`pipeline_runtime.py` 接入图片 API OCR timeout/retry 参数透传
+- [x] 回归测试：`tests/test_parse_inputs.py` 增加“本地 OCR 不可用时 API OCR 回退成功”用例
 
 ### 2026-04-21 · UI 收尾与桌面交付
 

@@ -13,11 +13,16 @@ Scope:
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any, Dict, List
 
 from app import collect_input_files, run_pipeline
+from tools.pipeline_runtime import (
+    build_pipeline_run_kwargs,
+    is_image_ocr_api_configured,
+    is_topic_api_configured,
+    is_web_enrichment_api_configured,
+    load_local_env,
+)
 
 try:
     from flask import Flask, jsonify, request
@@ -29,22 +34,7 @@ except Exception as exc:  # pragma: no cover
 
 # ---- .env auto-load (matches api_server.py behavior) ----------------------
 
-def _load_local_env(path: str = ".env") -> None:
-    env_file = Path(path)
-    if not env_file.exists() or not env_file.is_file():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        key, val = s.split("=", 1)
-        key = key.strip()
-        val = val.strip().strip("'\"")
-        if key and key not in os.environ:
-            os.environ[key] = val
-
-
-_load_local_env(".env")
+load_local_env(".env")
 
 
 # ---- request schema parser (stdlib, no pydantic) --------------------------
@@ -56,19 +46,36 @@ _DEFAULTS: Dict[str, Any] = {
     "output_dir": "outputs",
     "config": "config/pipeline_config.json",
     "topic_taxonomy": "config/topic_taxonomy.json",
-    "topic_mode": "auto",
-    "topic_api_timeout": 6.0,
-    "topic_api_retries": 1,
-    "enable_web_enrichment": False,
-    "web_enrichment_mode": "auto",
-    "web_enrichment_timeout": 6.0,
-    "web_enrichment_max_items": 8,
-    "web_enrichment_api_retries": 1,
-    "enable_api_assist": False,
-    "keypoint_min_confidence": 0.0,
-    "keypoint_max_points": 12,
+    "topic_mode": None,
+    "topic_api_timeout": None,
+    "topic_api_retries": None,
+    "enable_web_enrichment": None,
+    "web_enrichment_mode": None,
+    "web_enrichment_timeout": None,
+    "web_enrichment_max_items": None,
+    "web_enrichment_api_retries": None,
+    "enable_api_assist": None,
+    "keypoint_min_confidence": None,
+    "keypoint_max_points": None,
+    "validation_profile": None,
+    "export_docx": None,
+    "full_report": None,
     "quiet": True,
 }
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off", ""}:
+            return False
+    raise ValueError(f"invalid boolean value: {value!r}")
 
 
 def _parse_pipeline_request(payload: Any) -> Dict[str, Any]:
@@ -95,16 +102,29 @@ def _parse_pipeline_request(payload: Any) -> Dict[str, Any]:
 
     # minimal type coercion — let run_pipeline surface deeper issues
     try:
-        out["topic_api_timeout"] = float(out["topic_api_timeout"])
-        out["web_enrichment_timeout"] = float(out["web_enrichment_timeout"])
-        out["keypoint_min_confidence"] = float(out["keypoint_min_confidence"])
-        out["topic_api_retries"] = int(out["topic_api_retries"])
-        out["web_enrichment_max_items"] = int(out["web_enrichment_max_items"])
-        out["web_enrichment_api_retries"] = int(out["web_enrichment_api_retries"])
-        out["keypoint_max_points"] = int(out["keypoint_max_points"])
-        out["enable_web_enrichment"] = bool(out["enable_web_enrichment"])
-        out["enable_api_assist"] = bool(out["enable_api_assist"])
-        out["quiet"] = bool(out["quiet"])
+        if out["topic_api_timeout"] is not None:
+            out["topic_api_timeout"] = float(out["topic_api_timeout"])
+        if out["web_enrichment_timeout"] is not None:
+            out["web_enrichment_timeout"] = float(out["web_enrichment_timeout"])
+        if out["keypoint_min_confidence"] is not None:
+            out["keypoint_min_confidence"] = float(out["keypoint_min_confidence"])
+        if out["topic_api_retries"] is not None:
+            out["topic_api_retries"] = int(out["topic_api_retries"])
+        if out["web_enrichment_max_items"] is not None:
+            out["web_enrichment_max_items"] = int(out["web_enrichment_max_items"])
+        if out["web_enrichment_api_retries"] is not None:
+            out["web_enrichment_api_retries"] = int(out["web_enrichment_api_retries"])
+        if out["keypoint_max_points"] is not None:
+            out["keypoint_max_points"] = int(out["keypoint_max_points"])
+        if out["enable_web_enrichment"] is not None:
+            out["enable_web_enrichment"] = _as_bool(out["enable_web_enrichment"])
+        if out["enable_api_assist"] is not None:
+            out["enable_api_assist"] = _as_bool(out["enable_api_assist"])
+        if out["export_docx"] is not None:
+            out["export_docx"] = _as_bool(out["export_docx"])
+        if out["full_report"] is not None:
+            out["full_report"] = _as_bool(out["full_report"])
+        out["quiet"] = _as_bool(out["quiet"])
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid numeric/boolean field: {exc}") from exc
 
@@ -123,12 +143,9 @@ def health() -> Any:
             "status": "ok",
             "service": "knowledgeharness-flask",
             "features": {
-                "topic_api_configured": bool(
-                    os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
-                ),
-                "web_enrichment_api_configured": bool(
-                    os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
-                ),
+                "topic_api_configured": is_topic_api_configured(),
+                "web_enrichment_api_configured": is_web_enrichment_api_configured(),
+                "image_ocr_api_configured": is_image_ocr_api_configured(),
             },
         }
     )
@@ -154,10 +171,8 @@ def pipeline_run() -> Any:
         )
 
     try:
-        result = run_pipeline(
-            files,
-            output_dir=req["output_dir"],
-            topic_taxonomy_path=req["topic_taxonomy"],
+        run_kwargs, _meta = build_pipeline_run_kwargs(
+            config_path=req["config"],
             topic_mode=req["topic_mode"],
             topic_api_timeout=req["topic_api_timeout"],
             topic_api_retries=req["topic_api_retries"],
@@ -169,6 +184,15 @@ def pipeline_run() -> Any:
             api_assist_enabled=req["enable_api_assist"],
             keypoint_min_confidence=req["keypoint_min_confidence"],
             keypoint_max_points=req["keypoint_max_points"],
+            validation_profile=req["validation_profile"],
+            export_docx=req["export_docx"],
+            full_report=bool(req["full_report"]),
+        )
+        result = run_pipeline(
+            files,
+            output_dir=req["output_dir"],
+            topic_taxonomy_path=req["topic_taxonomy"],
+            **run_kwargs,
         )
     except Exception as exc:
         return jsonify({"ok": False, "error": f"pipeline error: {exc}"}), 500

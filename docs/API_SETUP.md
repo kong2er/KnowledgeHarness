@@ -1,12 +1,15 @@
 # API_SETUP
 
-Last Updated: 2026-04-21
+Last Updated: 2026-04-22
 
 本文件只说明当前仓库已实现的最基础 API 接入方式。
 
 ## 1. 当前支持的 API 接入点
 
 - Topic Coarse Classifier API（`tools/topic_coarse_classify.py`）
+- Content-Type Classifier API（`tools/classify_notes.py`，用于低置信度/未分类 chunk 的受约束补判）
+- Notes Organizer API（`tools/stage_summarize.py`，用于 Stage 3 的受约束整理）
+- Image OCR API（`tools/parse_inputs.py`，用于图片在本地 OCR 不可用/效果弱时的可选提取增强）
 - Web Enrichment API（`tools/web_enrichment.py`）
 
 两者都是可选协助模式。
@@ -42,6 +45,16 @@ KNOWLEDGEHARNESS_API_MODEL=deepseek-chat
 - 如需按模块覆盖，可额外设置：
   - `TOPIC_CLASSIFIER_API_URL` / `TOPIC_CLASSIFIER_API_KEY`
   - `TOPIC_CLASSIFIER_API_STYLE` / `TOPIC_CLASSIFIER_API_MODEL`
+  - `IMAGE_OCR_API_URL` / `IMAGE_OCR_API_KEY`
+  - `IMAGE_OCR_API_STYLE` / `IMAGE_OCR_API_MODEL`
+  - `IMAGE_OCR_ENHANCE_MODE` / `IMAGE_OCR_ENHANCE_MIN_SCORE`
+  - `IMAGE_OCR_ENHANCE_RATIO` / `IMAGE_OCR_ENHANCE_MIN_DELTA`
+  - `CONTENT_CLASSIFIER_API_URL` / `CONTENT_CLASSIFIER_API_KEY`
+  - `CONTENT_CLASSIFIER_API_STYLE` / `CONTENT_CLASSIFIER_API_MODEL`
+  - `NOTES_ORGANIZER_API_URL` / `NOTES_ORGANIZER_API_KEY`
+  - `NOTES_ORGANIZER_API_STYLE` / `NOTES_ORGANIZER_API_MODEL`
+  - `IMAGE_OCR_API_URL` / `IMAGE_OCR_API_KEY`
+  - `IMAGE_OCR_API_STYLE` / `IMAGE_OCR_API_MODEL`
   - `WEB_ENRICHMENT_API_URL` / `WEB_ENRICHMENT_API_KEY`
   - `WEB_ENRICHMENT_API_STYLE` / `WEB_ENRICHMENT_API_MODEL`
   - 覆盖变量留空时自动回退统一配置。
@@ -64,10 +77,17 @@ KNOWLEDGEHARNESS_API_MODEL=deepseek-chat
 
 它定义了两类模板：
 - `topic_classifier.system_prompt` + `output_contract`
+- `content_classifier.system_prompt` + `output_contract`
+- `notes_organizer.system_prompt` + `output_contract`
+- `image_ocr.system_prompt` + `output_contract`
 - `web_enrichment.system_prompt` + `output_contract`
 
 可通过环境变量替换模板路径：
 - `TOPIC_CLASSIFIER_API_TEMPLATE`
+- `IMAGE_OCR_API_TEMPLATE`
+- `CONTENT_CLASSIFIER_API_TEMPLATE`
+- `NOTES_ORGANIZER_API_TEMPLATE`
+- `IMAGE_OCR_API_TEMPLATE`
 - `WEB_ENRICHMENT_API_TEMPLATE`
 
 ## 3.1 UI 多 API 档案（新增）
@@ -76,6 +96,7 @@ KNOWLEDGEHARNESS_API_MODEL=deepseek-chat
 
 - 保存“当前 API 环境配置”为档案（可保存多套）
 - 选择某个档案并统一查看详情（URL/模板路径可见，密钥仅掩码显示）
+- 档案字段覆盖统一 API + Topic + Image OCR + Content Classifier + Notes Organizer + Web Enrichment
 - 应用某个档案到当前环境（可选：同时设为默认）
 - 用“当前环境配置”覆盖某个已存在档案（用于修改档案）
 - 删除某个档案
@@ -140,9 +161,85 @@ KNOWLEDGEHARNESS_API_MODEL=deepseek-chat
 }
 ```
 
+## 5.1 Content-Type Classifier API 请求/响应（基础）
+
+请求（POST JSON）核心字段：
+
+- `text`: string
+- `allowed_categories`: string[]（固定为项目已有 6 类）
+- `system_prompt`: string
+- `output_contract`: object
+- `rules.must_choose_from_allowed_categories`: true
+- `rules.fallback_category`: `unclassified`
+
+期望响应（JSON）：
+
+```json
+{
+  "category": "basic_concepts",
+  "confidence": 0.86,
+  "reason": "contains definition/explanation signals"
+}
+```
+
+约束：
+- `category` 必须来自 `allowed_categories`。
+- 越界或异常将降级回本地规则分类。
+
+## 5.2 Notes Organizer API 请求/响应（基础）
+
+请求（POST JSON）核心字段：
+
+- `categorized_notes`: object（按类聚合后的文本列表）
+- `output_contract`: 固定四个列表字段
+- `rules.only_use_user_material`: true
+- `rules.do_not_invent_new_facts`: true
+
+期望响应（JSON）：
+
+```json
+{
+  "must_remember_concepts": ["..."],
+  "high_priority_points": ["..."],
+  "easy_to_confuse_points": ["..."],
+  "next_reading_directions": ["..."]
+}
+```
+
+## 5.3 Image OCR API 请求/响应（基础）
+
+请求（POST JSON）核心字段（custom 风格）：
+
+- `task`: `image_ocr`
+- `mime_type`: string
+- `image_base64`: string
+- `system_prompt`: string
+- `output_contract`: object
+- `rules.extract_only`: true
+- `rules.do_not_invent_text`: true
+
+期望响应（JSON）：
+
+```json
+{
+  "text": "从图片中提取出的文字"
+}
+```
+
+说明：
+- openai/deepseek 兼容风格下会走 chat-completions + image_url(data URI) 模式。
+- 图片 API OCR 是可选增强，默认策略 `IMAGE_OCR_ENHANCE_MODE=auto`：
+  - `fallback_only`：仅本地 OCR 失败/空文本时调用 API；
+  - `auto`：本地失败/空文本，或本地结果过短时调用 API 并择优；
+  - `prefer_api`：启用 API 协助时优先使用 API 结果。
+- 仅在显式开启 API 协助时启用（CLI/UI/API 请求统一策略）。
+
 ## 6. 降级语义（已实现）
 
 - Topic API 不可用/超时/返回非法标签：降级到 local 规则或 `unknown_topic`
+- Content-Type Classifier API 不可用/超时/返回越界类别：降级到本地规则分类
+- Notes Organizer API 不可用/超时/返回非法结构：降级到本地 Stage 3 整理
+- Image OCR API 不可用/超时/返回空文本：降级回本地 OCR 结果或原有失败语义（不崩溃）
 - Web Enrichment API 不可用/超时：降级到 local URL 提取或 off
 - 所有降级都会记录 warnings，并汇入 `pipeline_notes`
 
@@ -161,6 +258,8 @@ KNOWLEDGEHARNESS_API_MODEL=deepseek-chat
 ```bash
 python3 app.py samples/demo.md --enable-api-assist --topic-mode api
 python3 app.py samples/demo.md --enable-api-assist --enable-web-enrichment --web-enrichment-mode api
+# 图片 OCR API 增强（当本地 OCR 不可用或抽取为空时触发）
+python3 app.py samples/ingest_demo.png --enable-api-assist --output-dir outputs
 ```
 
 如果没配置 API URL，你会看到：`请接入API后使用`。

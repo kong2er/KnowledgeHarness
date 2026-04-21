@@ -15,7 +15,10 @@ from tools.export_word import export_word_from_markdown
 from tools.extract_keypoints import extract_keypoints
 from tools.parse_inputs import SUPPORTED_EXTENSIONS, parse_inputs
 from tools.detect_semantic_conflicts import detect_semantic_conflicts
-from tools.runtime_config import load_runtime_config
+from tools.pipeline_runtime import (
+    build_pipeline_run_kwargs,
+    load_local_env,
+)
 from tools.stage_summarize import stage_summarize
 from tools.topic_coarse_classify import topic_coarse_classify
 from tools.validate_result import validate_result
@@ -128,23 +131,6 @@ def _cli_ingest_notifier(event: str, payload: Dict[str, Any]) -> None:
         )
 
 
-def _load_local_env(path: str = ".env") -> None:
-    """Load KEY=VALUE pairs from local .env (without overriding existing env)."""
-    env_file = Path(path)
-    if not env_file.exists() or not env_file.is_file():
-        return
-
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        key, val = s.split("=", 1)
-        key = key.strip()
-        val = val.strip().strip("'\"")
-        if key and key not in os.environ:
-            os.environ[key] = val
-
-
 def run_pipeline(
     input_files: List[str],
     output_dir: str = "outputs",
@@ -166,6 +152,13 @@ def run_pipeline(
     classification_category_priority: list | None = None,
     ocr_languages: str = "chi_sim+eng",
     ocr_fallback_language: str = "eng",
+    image_api_timeout_sec: float = 8.0,
+    image_api_retries: int = 1,
+    image_api_enhance_mode: str = "auto",
+    image_api_enhance_min_score: int = 40,
+    image_api_enhance_ratio: float = 1.1,
+    image_api_enhance_min_delta: int = 6,
+    validation_profile: str = "strict",
     markdown_use_details: bool = False,
     final_notes_only: bool = True,
     export_docx: bool = False,
@@ -177,6 +170,13 @@ def run_pipeline(
         notifier=notifier,
         ocr_languages=ocr_languages,
         ocr_fallback_language=ocr_fallback_language,
+        api_assist_enabled=api_assist_enabled,
+        image_api_timeout_sec=image_api_timeout_sec,
+        image_api_retries=image_api_retries,
+        image_api_enhance_mode=image_api_enhance_mode,
+        image_api_enhance_min_score=image_api_enhance_min_score,
+        image_api_enhance_ratio=image_api_enhance_ratio,
+        image_api_enhance_min_delta=image_api_enhance_min_delta,
     )
     documents = parsed["documents"]
     logs = parsed.get("logs", {}) or {}
@@ -202,10 +202,19 @@ def run_pipeline(
         keywords=classification_keywords,
         label_hints=classification_label_hints,
         category_priority=classification_category_priority,
+        api_assist_enabled=api_assist_enabled,
+        api_timeout_sec=topic_api_timeout,
+        api_retries=topic_api_retries,
     )
 
     # Must classify before summarize.
-    summaries = stage_summarize(documents, classified_output["categorized"])
+    summaries = stage_summarize(
+        documents,
+        classified_output["categorized"],
+        api_assist_enabled=api_assist_enabled,
+        api_timeout_sec=topic_api_timeout,
+        api_retries=topic_api_retries,
+    )
     keypoints = extract_keypoints(
         classified_output["categorized"],
         max_points=keypoint_max_points,
@@ -253,6 +262,7 @@ def run_pipeline(
         web_resources=web_resources,
         web_enrichment_enabled=web_enabled_effective,
         semantic_conflicts=semantic_conflicts,
+        validation_profile=validation_profile,
     )
 
     # review_needed stays chunk-level only; system-level signals go to
@@ -266,6 +276,22 @@ def run_pipeline(
         pipeline_notes.append(
             "no usable input text: every detected file failed or was empty"
         )
+    image_api_succeeded = int(ingestion_summary.get("image_api_succeeded", 0) or 0)
+    image_api_attempted = int(ingestion_summary.get("image_api_attempted", 0) or 0)
+    image_api_enhanced = int(ingestion_summary.get("image_api_enhanced", 0) or 0)
+    if image_api_attempted > 0 and image_api_succeeded == 0:
+        pipeline_notes.append(
+            f"image api ocr attempted but not used: {image_api_attempted} attempt(s)"
+        )
+    if image_api_succeeded > 0:
+        if image_api_enhanced > 0:
+            pipeline_notes.append(
+                f"image api ocr enhanced local result: {image_api_enhanced} file(s)"
+            )
+        else:
+            pipeline_notes.append(
+                f"image api ocr assisted: {image_api_succeeded} file(s)"
+            )
     if has_any_api and not api_assist_enabled:
         pipeline_notes.append(
             "api assist disabled: using local-only strategy unless explicitly set to api mode"
@@ -279,6 +305,18 @@ def run_pipeline(
         pipeline_notes.append(
             "topic coarse classification warnings: "
             + " | ".join(topic_output["warnings"])
+        )
+
+    if classified_output.get("warnings"):
+        pipeline_notes.append(
+            "content classification warnings: "
+            + " | ".join(classified_output["warnings"])
+        )
+
+    if summaries.get("warnings"):
+        pipeline_notes.append(
+            "stage summarize warnings: "
+            + " | ".join(summaries["warnings"])
         )
 
     if enrichment_output.get("warnings"):
@@ -336,7 +374,7 @@ def run_pipeline(
 
 
 def main() -> None:
-    _load_local_env(".env")
+    load_local_env(".env")
     parser = argparse.ArgumentParser(description="KnowledgeHarness MVP")
     parser.add_argument("inputs", nargs="+", help="Input files / dirs / globs")
     parser.add_argument("--output-dir", default="outputs", help="Output directory")
@@ -415,6 +453,12 @@ def main() -> None:
         help="Also export final result as Word (.docx)",
     )
     parser.add_argument(
+        "--validation-profile",
+        default=None,
+        choices=["strict", "lenient"],
+        help="Validation strictness profile: strict/lenient",
+    )
+    parser.add_argument(
         "--full-report",
         action="store_true",
         help="Export full markdown report instead of final-notes-only markdown",
@@ -430,100 +474,50 @@ def main() -> None:
         help="Explicitly enable optional API-assisted stages (default: off/local-first)",
     )
     args = parser.parse_args()
-    runtime_conf, conf_warnings = load_runtime_config(args.config)
-
     files = collect_input_files(args.inputs)
     if not files:
         raise SystemExit("No valid input files found.")
 
     notifier = None if args.quiet else _cli_ingest_notifier
-    topic_conf = runtime_conf.get("topic", {}) or {}
-    web_conf = runtime_conf.get("web_enrichment", {}) or {}
-    api_assist_conf = runtime_conf.get("api_assist", {}) or {}
-    key_conf = runtime_conf.get("key_points", {}) or {}
-    chunk_conf = runtime_conf.get("chunking", {}) or {}
-    cls_conf = runtime_conf.get("classification", {}) or {}
-    ocr_conf = runtime_conf.get("ocr", {}) or {}
-    export_conf = runtime_conf.get("export", {}) or {}
-    final_notes_default = bool(export_conf.get("final_notes_only", True))
-    topic_mode_effective = args.topic_mode or topic_conf.get("mode", "auto")
-    web_mode_effective = args.web_enrichment_mode or web_conf.get("mode", "auto")
-    api_assist_enabled = bool(args.enable_api_assist) or bool(
-        api_assist_conf.get("enabled_by_default", False)
+    run_kwargs, runtime_meta = build_pipeline_run_kwargs(
+        config_path=args.config,
+        topic_mode=args.topic_mode,
+        topic_api_timeout=args.topic_api_timeout,
+        topic_api_retries=args.topic_api_retries,
+        web_enrichment_enabled=(True if args.enable_web_enrichment else None),
+        web_enrichment_mode=args.web_enrichment_mode,
+        web_enrichment_timeout=args.web_enrichment_timeout,
+        web_enrichment_max_items=args.web_enrichment_max_items,
+        web_enrichment_api_retries=args.web_enrichment_api_retries,
+        api_assist_enabled=(True if args.enable_api_assist else None),
+        keypoint_min_confidence=args.keypoint_min_confidence,
+        keypoint_max_points=args.keypoint_max_points,
+        validation_profile=args.validation_profile,
+        export_docx=(True if args.export_docx else None),
+        full_report=bool(args.full_report),
     )
 
-    has_topic_api = bool(
-        os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
-        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
-    )
-    has_web_api = bool(
-        os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
-        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
-    )
+    topic_mode_effective = str(runtime_meta.get("topic_mode", "auto"))
+    web_mode_effective = str(runtime_meta.get("web_enrichment_mode", "auto"))
+    web_enabled_effective = bool(runtime_meta.get("web_enrichment_enabled", False))
+    has_topic_api = bool(runtime_meta.get("has_topic_api", False))
+    has_web_api = bool(runtime_meta.get("has_web_api", False))
 
-    if topic_mode_effective == "api" and not has_topic_api:
+    if topic_mode_effective.lower() == "api" and not has_topic_api:
         print("[api] topic classifier: 请接入API后使用")
     if (
-        bool(args.enable_web_enrichment) or bool(web_conf.get("enabled", False))
-    ) and web_mode_effective == "api" and not has_web_api:
+        web_enabled_effective
+        and web_mode_effective.lower() == "api"
+        and not has_web_api
+    ):
         print("[api] web enrichment: 请接入API后使用")
 
     result = run_pipeline(
         files,
         output_dir=args.output_dir,
         topic_taxonomy_path=args.topic_taxonomy,
-        topic_mode=topic_mode_effective,
-        topic_api_timeout=float(
-            args.topic_api_timeout
-            if args.topic_api_timeout is not None
-            else topic_conf.get("api_timeout_sec", 6.0)
-        ),
-        topic_api_retries=int(
-            args.topic_api_retries
-            if args.topic_api_retries is not None
-            else topic_conf.get("api_retries", 1)
-        ),
-        web_enrichment_enabled=(
-            bool(args.enable_web_enrichment) or bool(web_conf.get("enabled", False))
-        ),
-        web_enrichment_mode=web_mode_effective,
-        web_enrichment_timeout=float(
-            args.web_enrichment_timeout
-            if args.web_enrichment_timeout is not None
-            else web_conf.get("timeout_sec", 6.0)
-        ),
-        web_enrichment_max_items=int(
-            args.web_enrichment_max_items
-            if args.web_enrichment_max_items is not None
-            else web_conf.get("max_items", 8)
-        ),
-        web_enrichment_api_retries=int(
-            args.web_enrichment_api_retries
-            if args.web_enrichment_api_retries is not None
-            else web_conf.get("api_retries", 1)
-        ),
-        api_assist_enabled=api_assist_enabled,
-        keypoint_min_confidence=float(
-            args.keypoint_min_confidence
-            if args.keypoint_min_confidence is not None
-            else key_conf.get("min_confidence", 0.0)
-        ),
-        keypoint_max_points=int(
-            args.keypoint_max_points
-            if args.keypoint_max_points is not None
-            else key_conf.get("max_points", 12)
-        ),
-        chunk_max_chars=int(chunk_conf.get("max_chars", 500)),
-        classification_keywords=cls_conf.get("keywords"),
-        classification_label_hints=cls_conf.get("label_hints"),
-        classification_category_priority=cls_conf.get("category_priority"),
-        ocr_languages=str(ocr_conf.get("languages", "chi_sim+eng")),
-        ocr_fallback_language=str(ocr_conf.get("fallback_language", "eng")),
-        markdown_use_details=bool(export_conf.get("markdown_use_details", False)),
-        final_notes_only=(not bool(args.full_report)) and final_notes_default,
-        export_docx=bool(args.export_docx or export_conf.get("export_docx", False)),
-        pre_pipeline_notes=[f"runtime config warning: {w}" for w in conf_warnings],
         notifier=notifier,
+        **run_kwargs,
     )
     validation = result.get("validation", {}) or {}
     print("Pipeline completed.")

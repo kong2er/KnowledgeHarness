@@ -8,11 +8,15 @@ Scope:
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any, Dict, List
-
 from app import collect_input_files, run_pipeline
+from tools.pipeline_runtime import (
+    build_pipeline_run_kwargs,
+    is_image_ocr_api_configured,
+    is_topic_api_configured,
+    is_web_enrichment_api_configured,
+    load_local_env,
+)
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -28,39 +32,27 @@ class PipelineRequest(BaseModel):
     output_dir: str = "outputs"
     config: str = "config/pipeline_config.json"
     topic_taxonomy: str = "config/topic_taxonomy.json"
-    topic_mode: str = "auto"
-    topic_api_timeout: float = 6.0
-    topic_api_retries: int = 1
-    enable_web_enrichment: bool = False
-    web_enrichment_mode: str = "auto"
-    web_enrichment_timeout: float = 6.0
-    web_enrichment_max_items: int = 8
-    web_enrichment_api_retries: int = 1
-    enable_api_assist: bool = False
-    keypoint_min_confidence: float = 0.0
-    keypoint_max_points: int = 12
+    topic_mode: str | None = None
+    topic_api_timeout: float | None = None
+    topic_api_retries: int | None = None
+    enable_web_enrichment: bool | None = None
+    web_enrichment_mode: str | None = None
+    web_enrichment_timeout: float | None = None
+    web_enrichment_max_items: int | None = None
+    web_enrichment_api_retries: int | None = None
+    enable_api_assist: bool | None = None
+    keypoint_min_confidence: float | None = None
+    keypoint_max_points: int | None = None
+    validation_profile: str | None = None
+    export_docx: bool | None = None
+    full_report: bool | None = None
     quiet: bool = True
 
 
 app = FastAPI(title="KnowledgeHarness API", version="0.1.0")
 
 
-def _load_local_env(path: str = ".env") -> None:
-    env_file = Path(path)
-    if not env_file.exists() or not env_file.is_file():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        key, val = s.split("=", 1)
-        key = key.strip()
-        val = val.strip().strip("'\"")
-        if key and key not in os.environ:
-            os.environ[key] = val
-
-
-_load_local_env(".env")
+load_local_env(".env")
 
 
 @app.get("/health")
@@ -69,10 +61,9 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "service": "knowledgeharness-api",
         "features": {
-            "topic_api_configured": bool(os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()),
-            "web_enrichment_api_configured": bool(
-                os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
-            ),
+            "topic_api_configured": is_topic_api_configured(),
+            "web_enrichment_api_configured": is_web_enrichment_api_configured(),
+            "image_ocr_api_configured": is_image_ocr_api_configured(),
         },
     }
 
@@ -83,10 +74,8 @@ def pipeline_run(req: PipelineRequest) -> Dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="No valid input files found")
 
-    result = run_pipeline(
-        files,
-        output_dir=req.output_dir,
-        topic_taxonomy_path=req.topic_taxonomy,
+    run_kwargs, _meta = build_pipeline_run_kwargs(
+        config_path=req.config,
         topic_mode=req.topic_mode,
         topic_api_timeout=req.topic_api_timeout,
         topic_api_retries=req.topic_api_retries,
@@ -98,6 +87,15 @@ def pipeline_run(req: PipelineRequest) -> Dict[str, Any]:
         api_assist_enabled=req.enable_api_assist,
         keypoint_min_confidence=req.keypoint_min_confidence,
         keypoint_max_points=req.keypoint_max_points,
+        validation_profile=req.validation_profile,
+        export_docx=req.export_docx,
+        full_report=bool(req.full_report),
+    )
+    result = run_pipeline(
+        files,
+        output_dir=req.output_dir,
+        topic_taxonomy_path=req.topic_taxonomy,
+        **run_kwargs,
     )
 
     return {

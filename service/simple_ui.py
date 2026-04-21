@@ -20,22 +20,29 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import html
 import json
 import mimetypes
 import os
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app import collect_input_files, run_pipeline
+from tools.pipeline_runtime import (
+    build_pipeline_run_kwargs,
+    is_any_api_configured,
+    load_local_env,
+)
 
 ENV_PATH = Path(".env")
 API_PROFILES_PATH = ROOT / "config" / "api_profiles.json"
@@ -54,6 +61,9 @@ MODULE_OVERRIDE_KEYS = [
     ("TOPIC_CLASSIFIER_API_URL", "url", "Topic 分类 · API 地址"),
     ("TOPIC_CLASSIFIER_API_KEY", "password", "Topic 分类 · 密钥"),
     ("TOPIC_CLASSIFIER_API_TEMPLATE", "url", "Topic 分类 · 模板文件路径"),
+    ("IMAGE_OCR_API_URL", "url", "图片 OCR · API 地址"),
+    ("IMAGE_OCR_API_KEY", "password", "图片 OCR · 密钥"),
+    ("IMAGE_OCR_API_TEMPLATE", "url", "图片 OCR · 模板文件路径"),
     ("WEB_ENRICHMENT_API_URL", "url", "Web 补充 · API 地址"),
     ("WEB_ENRICHMENT_API_KEY", "password", "Web 补充 · 密钥"),
     ("WEB_ENRICHMENT_API_TEMPLATE", "url", "Web 补充 · 模板文件路径"),
@@ -133,21 +143,6 @@ def _parse_multipart(
             files.append((name, filename, payload))
 
     return fields, files
-
-
-def _load_local_env(path: str = ".env") -> None:
-    env_file = Path(path)
-    if not env_file.exists() or not env_file.is_file():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        key, val = s.split("=", 1)
-        key = key.strip()
-        val = val.strip().strip("'\"")
-        if key and key not in os.environ:
-            os.environ[key] = val
 
 
 def _read_env_pairs(path: Path = ENV_PATH) -> Dict[str, str]:
@@ -346,11 +341,8 @@ def _api_status_chip() -> str:
     stay fully local or will call out to an external service. Clickable
     so one click lands on /settings.
     """
-    unified = bool(os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip())
-    topic = bool(os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip())
-    web = bool(os.getenv("WEB_ENRICHMENT_API_URL", "").strip())
     active_profile = os.getenv(ACTIVE_PROFILE_ENV_KEY, "").strip()
-    if unified or topic or web:
+    if is_any_api_configured():
         label = "API 已配置"
         tone = "api-chip on"
         hint = "点击调整密钥与按模块覆盖"
@@ -555,6 +547,9 @@ def _relative_to_outputs(abs_path: str) -> str:
     try:
         p = Path(abs_path).resolve()
         p.relative_to(OUTPUT_WHITELIST_ROOT)
+        # `/download` only supports direct children under outputs root.
+        if p.parent != OUTPUT_WHITELIST_ROOT:
+            return ""
     except Exception:
         return ""
     return p.name
@@ -645,6 +640,9 @@ def _render_result_summary(result: Dict[str, Any]) -> str:
             <li>失败: <strong>{ingestion.get('failed', 0)}</strong></li>
             <li>空抽取: <strong>{ingestion.get('empty_extracted', 0)}</strong></li>
             <li>OCR 后端: <strong>{html.escape(str(ingestion.get('ocr_backend', 'unavailable')))}</strong></li>
+            <li>图片 API 尝试: <strong>{ingestion.get('image_api_attempted', 0)}</strong></li>
+            <li>图片 API 生效: <strong>{ingestion.get('image_api_succeeded', 0)}</strong></li>
+            <li>图片增强覆盖: <strong>{ingestion.get('image_api_enhanced', 0)}</strong></li>
             <li>chunk 数: <strong>{overview.get('chunk_count', 0)}</strong></li>
           </ul>
         </div>
@@ -682,7 +680,9 @@ def _render_page(
     web_mode = str(form.get("web_enrichment_mode", "auto"))
     kp_min = str(form.get("keypoint_min_confidence", "0.0"))
     kp_max = str(form.get("keypoint_max_points", "12"))
+    validation_profile = str(form.get("validation_profile", "strict"))
     export_docx = bool(form.get("export_docx", False))
+
     profiles_payload = _load_api_profiles()
     profile_names = _profile_names(profiles_payload)
     default_profile = (
@@ -693,259 +693,380 @@ def _render_page(
     if default_profile not in profile_names:
         default_profile = ""
     api_profile = default_profile
-    has_any_api = bool(
-        os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
-        or os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
-        or os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
-    )
+
+    has_any_api = is_any_api_configured()
+    image_enhance_mode = (os.getenv("IMAGE_OCR_ENHANCE_MODE", "auto") or "auto").strip().lower()
+    image_enhance_desc = {
+        "fallback_only": "仅失败回退（本地 OCR 失败/空文本才调用 API）",
+        "auto": "自动增强（本地低质量时调用 API 并择优）",
+        "prefer_api": "优先 API（启用 API 协助时优先用 API 结果）",
+    }.get(image_enhance_mode, "自动增强（本地低质量时调用 API 并择优）")
+
     uploaded_files = uploaded_files or []
     pool_selected = pool_selected or set()
 
-    result_html = ""
+    resolved_output_dir = _resolve_output_dir(output_dir)
+    output_browser_base = "/lab/outputs" if lab_mode else "/outputs"
+    output_browser_link = f"{output_browser_base}?dir={quote(str(resolved_output_dir))}"
+
+    # ---- result / status model for right panel ----
+    export_paths: Dict[str, Any] = {}
+    md_path = ""
+    json_path = ""
+    docx_path = ""
+    final_doc_preview = ""
+    overview: Dict[str, Any] = {}
+    ingestion: Dict[str, Any] = {}
+    validation: Dict[str, Any] = {}
+    warnings: List[str] = []
+    pipeline_notes: List[str] = []
+    topic_output: Dict[str, Any] = {}
+    topic_stats: Dict[str, Any] = {}
+    topic_items: List[Dict[str, Any]] = []
+
     if result is not None:
         export_paths = result.get("export_paths", {}) or {}
         md_path = str(export_paths.get("md_path", "")).strip()
         json_path = str(export_paths.get("json_path", "")).strip()
         docx_path = str(export_paths.get("docx_path", "")).strip()
+        overview = result.get("overview", {}) or {}
+        ingestion = overview.get("ingestion_summary", {}) or {}
+        validation = result.get("validation", {}) or {}
+        warnings = [str(w) for w in (validation.get("warnings", []) or [])]
+        pipeline_notes = [str(x) for x in (result.get("pipeline_notes", []) or [])]
+        topic_output = result.get("topic_classification", {}) or {}
+        topic_stats = topic_output.get("stats", {}) or {}
+        topic_items = topic_output.get("items", []) or []
 
-        final_doc_preview = ""
         if md_path:
             p = Path(md_path)
             if p.exists() and p.is_file():
-                text = p.read_text(encoding="utf-8", errors="replace")
-                final_doc_preview = text[:12000]
-                if len(text) > 12000:
-                    final_doc_preview += "\n\n…（已截断，请用上方下载链接获取完整文件）"
+                text_md = p.read_text(encoding="utf-8", errors="replace")
+                final_doc_preview = text_md[:10000]
+                if len(text_md) > 10000:
+                    final_doc_preview += "\n\n…（已截断，请使用“打开结果文件/下载”获取完整文件）"
             else:
-                final_doc_preview = "未找到最终文档文件，请先确认本次运行已成功导出。"
+                final_doc_preview = "未找到最终文档文件，请确认本次运行已成功导出。"
         else:
             final_doc_preview = "本次运行未返回最终文档路径。"
 
-        if lab_mode:
-            download_html = (
-                _render_download_link("Markdown", md_path)
-                + _render_download_link("JSON", json_path)
-                + _render_download_link("Word (.docx)", docx_path)
-            )
-            result_html = f"""
-            {_render_result_summary(result)}
-            <section class="card">
-              <h2>最终文档下载</h2>
-              {download_html}
-            </section>
-            <section class="card">
-              <h2>最终文档预览（Markdown 源文本）</h2>
-              <pre>{html.escape(final_doc_preview)}</pre>
-            </section>
-            """
-        else:
-            download_chips = (
-                _render_download_button("下载笔记", "md", md_path)
-                + _render_download_button("下载 Word", "docx", docx_path)
-            )
-            result_html = f"""
-            <section class="card">
-              <h2>笔记已生成</h2>
-              <div class="download-row">{download_chips}</div>
-            </section>
-            <section class="card">
-              <h2>笔记预览</h2>
-              <pre>{html.escape(final_doc_preview)}</pre>
-            </section>
-            """
+    detected = int(ingestion.get("detected", 0) or 0)
+    succeeded = int(ingestion.get("succeeded", 0) or 0)
+    failed = int(ingestion.get("failed", 0) or 0)
+    empty_extracted = int(ingestion.get("empty_extracted", 0) or 0)
 
-    error_html = (
-        f'<div class="error">{html.escape(error)}</div>'
-        if error
-        else ""
-    )
-    flash_html = (
-        f'<div class="ok">{html.escape(flash)}</div>'
-        if flash
-        else ""
-    )
+    if error:
+        stage_title = "执行失败"
+        stage_desc = "本次运行被中断，请根据错误提示修正输入后重试。"
+    elif result is None:
+        stage_title = "等待开始"
+        stage_desc = "请选择资料并点击“开始整理”。"
+    elif warnings:
+        stage_title = "已完成（含告警）"
+        stage_desc = "笔记已导出，可先查看结果，再根据告警决定是否重跑。"
+    else:
+        stage_title = "已完成"
+        stage_desc = "笔记已导出，可直接查看结果文件。"
 
-    # --- Pool card ---
+    stage_steps = [
+        "读取资料",
+        "切分",
+        "主题粗分类",
+        "内容分类",
+        "阶段总结",
+        "校验",
+        "导出",
+    ]
+    if result is not None:
+        stage_steps_html = "".join(
+            f'<li class="step done"><span class="dot"></span>{html.escape(step)}</li>'
+            for step in stage_steps
+        )
+    elif error:
+        stage_steps_html = (
+            '<li class="step error"><span class="dot"></span>运行中断（请看下方错误）</li>'
+            + "".join(
+                f'<li class="step pending"><span class="dot"></span>{html.escape(step)}</li>'
+                for step in stage_steps
+            )
+        )
+    else:
+        stage_steps_html = "".join(
+            f'<li class="step pending"><span class="dot"></span>{html.escape(step)}</li>'
+            for step in stage_steps
+        )
+
+    warnings_html = "".join(f"<li>{html.escape(w)}</li>" for w in warnings[:6]) or "<li>（无）</li>"
+    notes_html = "".join(f"<li>{html.escape(n)}</li>" for n in pipeline_notes[:10]) or "<li>（无）</li>"
+
+    topic_top = topic_stats.get("counts_by_label", {}) if isinstance(topic_stats.get("counts_by_label", {}), dict) else {}
+    topic_counts_html = "".join(
+        f"<li>{html.escape(str(k))}: <strong>{int(v)}</strong></li>"
+        for k, v in topic_top.items()
+    ) or "<li>（无）</li>"
+    topic_item_html = "".join(
+        f"<li>{html.escape(str(it.get('source_name') or 'unknown'))} → "
+        f"<strong>{html.escape(str(it.get('topic_label') or 'unknown_topic'))}</strong>"
+        f"（conf={html.escape(str(it.get('confidence') or '0'))}，{'API' if it.get('used_api') else 'local'}）</li>"
+        for it in topic_items[:8]
+    ) or "<li>（无）</li>"
+
+    flash_html = f'<div class="ok">{html.escape(flash)}</div>' if flash else ""
+    error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+
+    # ---- file pool ----
     pool_items = _list_uploaded_pool()
-    pool_rows_html: List[str] = []
-    # Per-extension counters. Group png/jpg/jpeg as they share OCR semantics
-    # and are jointly capped by MAX_IMAGE_COUNT_PER_RUN.
     from collections import Counter
     import time as _time
+
     ext_counter: Counter = Counter()
-    for name, _, _ in pool_items:
+    pool_rows_html: List[str] = []
+    for name, size, mtime in pool_items:
         ext = Path(name).suffix.lower().lstrip(".") or "(无后缀)"
         ext_counter[ext] += 1
-
-    # Build the breakdown line, count-descending then ext-ascending.
-    breakdown_parts: List[str] = []
-    image_total = ext_counter["png"] + ext_counter["jpg"] + ext_counter["jpeg"]
-    for ext, count in sorted(ext_counter.items(), key=lambda kv: (-kv[1], kv[0])):
-        breakdown_parts.append(f".{ext} × {count}")
-    breakdown_line = " · ".join(breakdown_parts)
-
-    for name, size, mtime in pool_items:
         date_str = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(mtime))
-        ext = Path(name).suffix.lower().lstrip(".") or "(无后缀)"
         is_image = ext in {"png", "jpg", "jpeg"}
         pill_class = "type-pill type-img" if is_image else "type-pill"
         escaped = html.escape(name)
         checked = "checked" if name in pool_selected else ""
+        pick_status = "本次将处理" if checked else "待选择"
+        pick_status_class = "file-status selected" if checked else "file-status"
         pool_rows_html.append(
             "<li class=\"pool-row\">"
             "<label class=\"pool-pick\">"
-            f'<input type="checkbox" name="existing_files" value="{escaped}" {checked} form="runForm" />'
-            f'<span class="{pill_class}">{html.escape(ext)}</span>'
-            f'<span class="pool-name">{escaped}</span>'
-            f'<span class="pool-meta">{_format_size(size)} · {date_str}</span>'
+            f'<input type=\"checkbox\" name=\"existing_files\" value=\"{escaped}\" {checked} form=\"runForm\" />'
+            f'<span class=\"{pill_class}\">{html.escape(ext)}</span>'
+            f'<span class=\"pool-name\">{escaped}</span>'
+            f'<span class=\"pool-meta\">{_format_size(size)} · {date_str}</span>'
+            f'<span class=\"{pick_status_class}\">{pick_status}</span>'
             "</label>"
-            '<form method="post" action="/uploads/remove" class="pool-remove">'
-            f'<input type="hidden" name="name" value="{escaped}" />'
-            f'<input type="hidden" name="ui_mode" value="{"lab" if lab_mode else "prod"}" />'
-            '<button type="submit" class="link-btn" title="从文件池移除">删除</button>'
+            '<form method=\"post\" action=\"/uploads/remove\" class=\"pool-remove\">'
+            f'<input type=\"hidden\" name=\"name\" value=\"{escaped}\" />'
+            f'<input type=\"hidden\" name=\"ui_mode\" value=\"{"lab" if lab_mode else "prod"}\" />'
+            '<button type=\"submit\" class=\"link-btn\" title=\"从文件池移除\">删除</button>'
             "</form>"
             "</li>"
         )
 
+    breakdown_parts = [f".{ext} × {count}" for ext, count in sorted(ext_counter.items(), key=lambda kv: (-kv[1], kv[0]))]
+    breakdown_line = " · ".join(breakdown_parts) if breakdown_parts else "当前暂无文件"
+
+    image_total = ext_counter.get("png", 0) + ext_counter.get("jpg", 0) + ext_counter.get("jpeg", 0)
+    upload_info = ""
+    if uploaded_files:
+        upload_info = f"本次新增上传 {len(uploaded_files)} 个文件。"
+
+    pool_warns: List[str] = []
+    if image_total > MAX_IMAGE_COUNT_PER_RUN:
+        pool_warns.append(
+            f"当前池中有 {image_total} 张图片，超过单次处理上限 {MAX_IMAGE_COUNT_PER_RUN} 张，请勾选部分后再运行。"
+        )
+    if len(pool_items) > MAX_TOTAL_FILES_PER_RUN:
+        pool_warns.append(
+            f"当前池中文件总数 {len(pool_items)} 超过单次处理上限 {MAX_TOTAL_FILES_PER_RUN} 个，请先清理或少量勾选。"
+        )
+    pool_warn_html = "".join(f'<p class="pool-warn">{html.escape(msg)}</p>' for msg in pool_warns)
+
     if pool_items:
-        image_warn = ""
-        if image_total > MAX_IMAGE_COUNT_PER_RUN:
-            image_warn = (
-                f'<span class="pool-warn">当前池中有 {image_total} 张图片，超过单次处理上限 '
-                f'{MAX_IMAGE_COUNT_PER_RUN} 张——请勾选时只选其中部分</span>'
-            )
-        total_warn = ""
-        if len(pool_items) > MAX_TOTAL_FILES_PER_RUN:
-            total_warn = (
-                f'<span class="pool-warn">池中文件总数 {len(pool_items)} 已超过单次处理上限 '
-                f'{MAX_TOTAL_FILES_PER_RUN} 个</span>'
-            )
-        pool_card_html = f"""
-        <section class="card">
-          <div class="pool-head">
-            <h2>历史上传 <span class="pool-count">{len(pool_items)} 个</span></h2>
+        pool_list_html = f"""
+        <section class="card left-card">
+          <div class="card-head">
+            <h2>文件列表 <span class="pool-count">{len(pool_items)}</span></h2>
             <form method="post" action="/uploads/clear" class="pool-clear">
               <input type="hidden" name="ui_mode" value="{"lab" if lab_mode else "prod"}" />
-              <button type="submit" class="danger-btn">清空全部</button>
+              <button type="submit" class="tertiary danger">清空列表</button>
             </form>
           </div>
-          <p class="pool-breakdown">{html.escape(breakdown_line)}</p>
-          {image_warn}{total_warn}
+          <p class="hint">{html.escape(breakdown_line)}</p>
+          <p class="hint">{html.escape(upload_info)}</p>
+          {pool_warn_html}
           <ul class="pool-list">{''.join(pool_rows_html)}</ul>
         </section>
         """
     else:
-        pool_card_html = ""
+        pool_list_html = """
+        <section class="card left-card">
+          <h2>文件列表</h2>
+          <p class="empty">还没有文件。请先点击“选择文件”或“选择文件夹”。</p>
+        </section>
+        """
 
-    mode_badge = (
-        '<span class="mode-badge" title="带完整诊断信息">调试视图</span>'
-        if lab_mode
-        else ''
-    )
-    page_title = "KnowledgeHarness"
-    page_subtitle = (
-        "调试视图：带完整分类、校验、原始 JSON 等诊断信息。"
-        if lab_mode
-        else "上传学习资料，自动整理为结构化复习笔记。"
-    )
-    run_status_text = (
-        "流水线执行中：解析 → 切分 → 主题粗分类 → 内容分类 → 总结 → 重点 → 补充 → 校验 → 导出…"
-        if lab_mode
-        else "正在处理资料并生成笔记，请稍候…"
-    )
-    submit_button_label = "运行流水线" if lab_mode else "生成笔记"
-
+    # ---- mode-specific controls ----
     profile_select_html = ""
     if profile_names:
-        options = [
-            '<option value="">使用当前环境（不指定档案）</option>',
-        ]
+        options = ['<option value="">使用当前环境（不指定档案）</option>']
         for name in profile_names:
-            options.append(
-                f'<option value="{html.escape(name)}" {_selected(api_profile, name)}>{html.escape(name)}</option>'
-            )
+            options.append(f'<option value="{html.escape(name)}" {_selected(api_profile, name)}>{html.escape(name)}</option>')
         profile_select_html = f"""
-          <div class="row">
-            <label for="api_profile">API 配置档案</label>
-            <select id="api_profile" name="api_profile">
-              {''.join(options)}
-            </select>
-            <p class="hint">可在“API 设置”页新增/删除多个档案，并在此选择本次调用使用的档案。</p>
-          </div>
+        <div class="row">
+          <label for="api_profile">API 档案</label>
+          <select id="api_profile" name="api_profile">{''.join(options)}</select>
+          <p class="hint">档案在“API 设置”页维护，此处仅选择本次运行使用的档案。</p>
+        </div>
         """
 
     api_assist_hint_html = (
-        '<p class="hint">已检测到 API 配置：默认仍按本地模式运行。勾选“启用 API 协助”后才会调用外部 API（失败自动降级）。</p>'
+        '<p class="hint">已检测到 API 配置。默认仍本地运行；勾选“启用 API 协助”后才调用外部 API。'
+        f' 图片增强策略：<strong>{html.escape(image_enhance_desc)}</strong>。</p>'
         if has_any_api
-        else '<p class="hint">未检测到 API 配置：当前将以本地模式运行。可在“API 设置”中接入后增强结果。</p>'
+        else '<p class="hint">未检测到 API 配置：当前将以本地模式运行。</p>'
     )
 
     prod_controls_html = """
-          {profile_select_html}
-          <div class="row">{api_assist_hint_html}</div>
-          <div class="row">
-            <label><input type="checkbox" name="enable_api_assist" {api_assist_checked} /> 启用 API 协助（可选）</label>
-          </div>
-          <div class="row">
-            <label><input type="checkbox" name="export_docx" {docx_checked} /> 同时导出 Word（.docx）</label>
-          </div>
-          <input type="hidden" name="topic_mode" value="auto" />
-          <input type="hidden" name="web_enrichment_mode" value="auto" />
-          <input type="hidden" name="keypoint_min_confidence" value="0.0" />
-          <input type="hidden" name="keypoint_max_points" value="12" />
+        {profile_select_html}
+        <div class="row">{api_assist_hint_html}</div>
+        <div class="row inline-checks">
+          <label><input type="checkbox" name="enable_api_assist" {api_assist_checked} /> 启用 API 协助（可选）</label>
+          <label><input type="checkbox" name="export_docx" {docx_checked} /> 同时导出 Word（.docx）</label>
+        </div>
+        <div class="row">
+          <label for="validation_profile">校验策略</label>
+          <select id="validation_profile" name="validation_profile">
+            <option value="strict" {validation_profile_strict}>严格（strict）</option>
+            <option value="lenient" {validation_profile_lenient}>宽松（lenient，图片/小样本建议）</option>
+          </select>
+        </div>
+        <input type="hidden" name="topic_mode" value="auto" />
+        <input type="hidden" name="web_enrichment_mode" value="auto" />
+        <input type="hidden" name="keypoint_min_confidence" value="0.0" />
+        <input type="hidden" name="keypoint_max_points" value="12" />
     """.format(
-        docx_checked=_checked(export_docx),
-        api_assist_checked=_checked(enable_api_assist),
         profile_select_html=profile_select_html,
         api_assist_hint_html=api_assist_hint_html,
+        api_assist_checked=_checked(enable_api_assist),
+        docx_checked=_checked(export_docx),
+        validation_profile_strict=_selected(validation_profile, "strict"),
+        validation_profile_lenient=_selected(validation_profile, "lenient"),
     )
 
     lab_controls_html = f"""
-          {profile_select_html}
-          <div class="row">
-            <label><input type="checkbox" name="enable_api_assist" {_checked(enable_api_assist)} /> 启用 API 协助（默认关闭）</label>
-            <label><input type="checkbox" name="enable_web_enrichment" {_checked(enable_web)} /> 启用 Web 补充</label>
-            <label><input type="checkbox" name="export_docx" {_checked(export_docx)} /> 同时导出 Word（.docx）</label>
-          </div>
-          <details>
-            <summary>高级选项</summary>
-            <div class="grid">
-              <div class="row">
-                <label for="topic_mode">主题分类模式</label>
-                <select id="topic_mode" name="topic_mode">
-                  <option value="auto" {_selected(topic_mode, "auto")}>自动（auto）</option>
-                  <option value="local" {_selected(topic_mode, "local")}>本地（local）</option>
-                  <option value="api" {_selected(topic_mode, "api")}>接口（api）</option>
-                </select>
-              </div>
-              <div class="row">
-                <label for="web_enrichment_mode">Web 补充模式</label>
-                <select id="web_enrichment_mode" name="web_enrichment_mode">
-                  <option value="auto" {_selected(web_mode, "auto")}>自动（auto）</option>
-                  <option value="off" {_selected(web_mode, "off")}>关闭（off）</option>
-                  <option value="local" {_selected(web_mode, "local")}>本地（local）</option>
-                  <option value="api" {_selected(web_mode, "api")}>接口（api）</option>
-                </select>
-              </div>
-              <div class="row">
-                <label for="keypoint_min_confidence">关键点最小置信度（0–1）</label>
-                <input id="keypoint_min_confidence" type="number" step="0.05" min="0" max="1" name="keypoint_min_confidence" value="{html.escape(kp_min)}" />
-              </div>
-              <div class="row">
-                <label for="keypoint_max_points">关键点最大数量</label>
-                <input id="keypoint_max_points" type="number" step="1" min="1" max="200" name="keypoint_max_points" value="{html.escape(kp_max)}" />
-              </div>
+        {profile_select_html}
+        <div class="row inline-checks">
+          <label><input type="checkbox" name="enable_api_assist" {_checked(enable_api_assist)} /> 启用 API 协助</label>
+          <label><input type="checkbox" name="enable_web_enrichment" {_checked(enable_web)} /> 启用 Web 补充</label>
+          <label><input type="checkbox" name="export_docx" {_checked(export_docx)} /> 导出 Word（.docx）</label>
+        </div>
+        <details>
+          <summary>高级运行参数</summary>
+          <div class="grid-two">
+            <div class="row">
+              <label for="topic_mode">主题分类模式</label>
+              <select id="topic_mode" name="topic_mode">
+                <option value="auto" {_selected(topic_mode, "auto")}>自动（auto）</option>
+                <option value="local" {_selected(topic_mode, "local")}>本地（local）</option>
+                <option value="api" {_selected(topic_mode, "api")}>接口（api）</option>
+              </select>
             </div>
-          </details>
+            <div class="row">
+              <label for="web_enrichment_mode">Web 补充模式</label>
+              <select id="web_enrichment_mode" name="web_enrichment_mode">
+                <option value="auto" {_selected(web_mode, "auto")}>自动（auto）</option>
+                <option value="off" {_selected(web_mode, "off")}>关闭（off）</option>
+                <option value="local" {_selected(web_mode, "local")}>本地（local）</option>
+                <option value="api" {_selected(web_mode, "api")}>接口（api）</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="keypoint_min_confidence">关键点最小置信度（0~1）</label>
+              <input id="keypoint_min_confidence" type="number" step="0.05" min="0" max="1" name="keypoint_min_confidence" value="{html.escape(kp_min)}" />
+            </div>
+            <div class="row">
+              <label for="keypoint_max_points">关键点最大数量</label>
+              <input id="keypoint_max_points" type="number" step="1" min="1" max="200" name="keypoint_max_points" value="{html.escape(kp_max)}" />
+            </div>
+            <div class="row">
+              <label for="validation_profile">校验策略</label>
+              <select id="validation_profile" name="validation_profile">
+                <option value="strict" {_selected(validation_profile, "strict")}>严格（strict）</option>
+                <option value="lenient" {_selected(validation_profile, "lenient")}>宽松（lenient）</option>
+              </select>
+            </div>
+          </div>
+        </details>
     """
 
     controls_html = lab_controls_html if lab_mode else prod_controls_html
+
     if lab_mode:
-        lab_switch_html = '<a class="button-link ghost-link" href="/">切换为对外视图</a>'
-    elif LAB_ENABLED and SHOW_LAB_LINK:
-        lab_switch_html = '<a class="button-link ghost-link" href="/lab">进入调试视图</a>'
+        lab_switch_html = '<a class="secondary-link" href="/">切换为对外视图</a>'
+        submit_button_label = "运行流水线"
+        page_subtitle = "调试视图：显示完整过程信息与诊断结果。"
     else:
-        lab_switch_html = ""
+        submit_button_label = "开始整理"
+        page_subtitle = "导入学习资料，自动整理为结构化笔记。"
+        if LAB_ENABLED and SHOW_LAB_LINK:
+            lab_switch_html = '<a class="secondary-link" href="/lab">进入调试视图</a>'
+        else:
+            lab_switch_html = ""
+
+    mode_badge = (
+        '<span class="mode-badge" title="带完整诊断信息">调试视图</span>' if lab_mode else ''
+    )
+
+    md_download_chip = _render_download_button("下载 Markdown", "md", md_path)
+    docx_download_chip = _render_download_button("下载 Word", "docx", docx_path)
+    open_result_btn = (
+        f'<a class="secondary-link" href="/download?name={html.escape(_relative_to_outputs(md_path))}" download>打开结果文件</a>'
+        if _relative_to_outputs(md_path)
+        else '<span class="disabled-action">打开结果文件（未生成）</span>'
+    )
+
+    result_summary_html = ""
+    if result is not None:
+        result_summary_html = f"""
+        <section class="card right-card">
+          <h2>结果摘要</h2>
+          <ul class="kv-list">
+            <li>处理文件数：<strong>{detected}</strong></li>
+            <li>成功：<strong>{succeeded}</strong> · 失败：<strong>{failed}</strong> · 空文本：<strong>{empty_extracted}</strong></li>
+            <li>校验状态：<strong>{'通过' if validation.get('is_valid') else '有告警'}</strong>（warnings: {len(warnings)}）</li>
+            <li>导出状态：<strong>{'已生成' if md_path else '未生成'}</strong></li>
+          </ul>
+          <div class="result-actions">
+            {open_result_btn}
+            <a class="secondary-link" href="{html.escape(output_browser_link)}">打开输出目录</a>
+          </div>
+          <div class="download-row">{md_download_chip}{docx_download_chip}</div>
+        </section>
+        <section class="card right-card">
+          <h2>主题粗分类摘要</h2>
+          <p class="hint">API 协助: <strong>{topic_stats.get('used_api_count', 0)}</strong> · 降级: <strong>{topic_stats.get('degraded_count', 0)}</strong></p>
+          <div class="grid-two">
+            <div>
+              <h3>按主题计数</h3>
+              <ul>{topic_counts_html}</ul>
+            </div>
+            <div>
+              <h3>按文件结果</h3>
+              <ul>{topic_item_html}</ul>
+            </div>
+          </div>
+        </section>
+        <section class="card right-card">
+          <h2>笔记预览</h2>
+          <pre>{html.escape(final_doc_preview or '（暂无可预览内容）')}</pre>
+        </section>
+        """
+        if lab_mode:
+            result_summary_html += f"""
+            <section class="card right-card">
+              <details>
+                <summary>查看完整处理摘要（调试）</summary>
+                {_render_result_summary(result)}
+              </details>
+            </section>
+            """
+    else:
+        result_summary_html = f"""
+        <section class="card right-card">
+          <h2>结果摘要</h2>
+          <p class="empty">尚未开始运行。完成后会在这里显示结果摘要与导出入口。</p>
+          <div class="result-actions">
+            <span class="disabled-action">打开结果文件（未生成）</span>
+            <a class="secondary-link" href="{html.escape(output_browser_link)}">打开输出目录</a>
+          </div>
+        </section>
+        """
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -954,315 +1075,244 @@ def _render_page(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KnowledgeHarness · 笔记整理</title>
   <style>
-    /* ---- design tokens ----
-     * Single neutral palette + one accent color. No competing greens and blues.
-     * Inspired by common Linear / Vercel dashboards rather than "early bootstrap".
-     */
     :root {{
-      --bg:           #f6f7f9;
-      --surface:      #ffffff;
-      --surface-2:    #f9fafb;
-      --border:       #e5e7eb;
-      --border-soft:  #eef0f3;
-      --text:         #111827;
-      --text-muted:   #6b7280;
-      --accent:       #111827;   /* primary button = near-black for a calm, pro feel */
-      --accent-ink:   #ffffff;
-      --accent-soft:  #f3f4f6;
-      --danger:       #b91c1c;
-      --ok:           #047857;
-      --warn:         #b45309;
-      --radius:       10px;
-      --radius-sm:    6px;
-      --shadow-1:     0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+      --bg: #f5f7fb;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --border: #e5e7eb;
+      --text: #111827;
+      --text-muted: #6b7280;
+      --primary: #111827;
+      --primary-ink: #ffffff;
+      --ok: #047857;
+      --warn: #b45309;
+      --danger: #b91c1c;
+      --radius: 10px;
+      --radius-sm: 8px;
+      --shadow: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.08);
     }}
 
     * {{ box-sizing: border-box; }}
     html, body {{ margin: 0; padding: 0; }}
     body {{
-      padding: 32px 24px 64px;
       background: var(--bg);
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-                   "Helvetica Neue", Helvetica, Arial,
-                   "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
-                   "Noto Sans CJK SC", sans-serif;
-      font-size: 14.5px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial,
+                   "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      font-size: 14px;
       line-height: 1.55;
-      -webkit-font-smoothing: antialiased;
+      padding: 22px 18px 42px;
     }}
-    .wrap {{ max-width: 880px; margin: 0 auto; }}
+    .wrap {{ max-width: 1280px; margin: 0 auto; }}
 
-    /* header */
-    .app-header {{ margin-bottom: 20px; }}
-    .app-header h1 {{
-      margin: 0;
-      font-size: 22px;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-      display: flex; align-items: center; gap: 10px;
-    }}
-    .app-header .subtitle {{
-      margin: 6px 0 0 0;
-      color: var(--text-muted);
-      font-size: 13.5px;
-    }}
+    .app-header {{ margin-bottom: 14px; }}
+    .app-header h1 {{ margin: 0; font-size: 24px; font-weight: 650; display: flex; align-items: center; gap: 10px; }}
+    .subtitle {{ margin: 6px 0 0; color: var(--text-muted); font-size: 13px; }}
 
-    /* cards */
+    .global-msg {{ margin-bottom: 12px; }}
+    .ok, .error, .status {{ padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 8px; font-size: 13px; }}
+    .ok {{ background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0; }}
+    .error {{ background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }}
+    .status {{ background: #fff7ed; color: var(--warn); border: 1px solid #fde68a; }}
+
+    .layout {{ display: grid; grid-template-columns: minmax(380px, 1.05fr) minmax(420px, 1fr); gap: 16px; align-items: start; }}
+    .left-col, .right-col {{ min-width: 0; }}
+
     .card {{
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 20px 22px;
-      margin-bottom: 16px;
-      box-shadow: var(--shadow-1);
+      box-shadow: var(--shadow);
+      padding: 16px 16px;
+      margin-bottom: 12px;
     }}
-    .card h2 {{
-      margin: 0 0 14px 0;
-      font-size: 15px;
-      font-weight: 600;
-      letter-spacing: -0.005em;
-    }}
-    .card h3 {{
-      margin: 0 0 8px 0; font-size: 13px; font-weight: 600;
-      color: var(--text-muted); text-transform: none;
-    }}
+    .left-card h2, .right-card h2 {{ margin: 0 0 10px 0; font-size: 15px; }}
+    h3 {{ margin: 0 0 8px 0; font-size: 13px; color: var(--text-muted); font-weight: 600; }}
 
-    /* typography helpers */
-    label {{ display: block; margin-bottom: 6px; font-weight: 500; font-size: 13.5px; }}
-    .hint {{ color: var(--text-muted); font-size: 12.5px; margin: 6px 0 0 0; }}
-    code {{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12.5px; background: var(--accent-soft);
-      padding: 1px 5px; border-radius: 4px;
-    }}
+    .card-head {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }}
+    .pool-count {{ display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 22px;
+      border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--text-muted); }}
 
-    /* form controls */
-    input[type=text], input[type=number], input[type=password], textarea, select {{
-      width: 100%; padding: 8px 10px;
-      border: 1px solid var(--border); border-radius: var(--radius-sm);
-      background: var(--surface); color: var(--text);
-      font: inherit;
-      transition: border-color .15s, box-shadow .15s;
-    }}
-    input:focus, textarea:focus, select:focus {{
-      outline: none;
-      border-color: var(--text);
-      box-shadow: 0 0 0 3px rgba(17, 24, 39, 0.08);
-    }}
-    .row {{ margin-bottom: 14px; }}
+    .support-tags {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }}
+    .tag {{ font-size: 12px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; background: var(--surface-soft); }}
 
-    /* buttons */
-    button, .button-link {{
-      display: inline-block; text-decoration: none; font: inherit;
-      font-weight: 500; cursor: pointer;
-      padding: 8px 16px; border-radius: var(--radius-sm);
-      border: 1px solid transparent;
-      transition: background .15s, border-color .15s, color .15s;
-    }}
-    button {{
-      background: var(--accent); color: var(--accent-ink);
-    }}
-    button:hover {{ background: #000; }}
-    button[disabled] {{ background: #9ca3af; cursor: progress; }}
-    .button-link {{
-      background: var(--surface); color: var(--text);
-      border-color: var(--border);
-      margin-left: 8px;
-    }}
-    .button-link:hover {{ background: var(--accent-soft); }}
-    .ghost-link {{ background: transparent; color: var(--text-muted); border-color: var(--border-soft); }}
-    .link-btn {{
-      background: transparent; color: var(--danger);
-      border: 0; padding: 2px 6px; font-size: 12.5px;
-      cursor: pointer; text-decoration: underline;
-    }}
-    .danger-btn {{
-      background: var(--surface); color: var(--danger);
-      border: 1px solid #fecaca;
-      padding: 6px 10px; font-size: 12.5px; font-weight: 500; border-radius: var(--radius-sm);
-    }}
-    .danger-btn:hover {{ background: #fef2f2; }}
+    .hint {{ margin: 6px 0 0; color: var(--text-muted); font-size: 12px; }}
+    .empty {{ color: var(--text-muted); margin: 0; }}
 
-    /* inline banners */
-    .error {{ background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
-             padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px;
-             font-size: 13.5px; }}
-    .ok {{ background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0;
-          padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px;
-          font-size: 13.5px; }}
-    .status {{ background: #fff7ed; color: var(--warn); border: 1px solid #fde68a;
-              padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px;
-              font-size: 13.5px; }}
-
-    /* preview <pre> */
-    pre {{
-      white-space: pre-wrap; word-break: break-word;
-      background: var(--surface-2); border: 1px solid var(--border-soft);
-      border-radius: var(--radius-sm); padding: 12px 14px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12.5px; line-height: 1.55;
-      max-height: 420px; overflow-y: auto; margin: 0;
-    }}
-
-    /* mode badge — shown ONLY in lab mode */
-    .mode-badge {{
-      display: inline-flex; align-items: center;
-      padding: 2px 8px; border-radius: 999px;
-      background: #fef3c7; color: var(--warn); border: 1px solid #fde68a;
-      font-size: 11.5px; font-weight: 500;
-    }}
-    /* API status chip in the header — prod-mode-safe (never shows any
-       value, only configured/not-configured). */
-    .api-chip {{
-      display: inline-flex; align-items: center; gap: 6px;
-      text-decoration: none;
-      padding: 2px 10px; border-radius: 999px;
-      font-size: 11.5px; font-weight: 500;
+    label {{ display: block; margin-bottom: 6px; font-weight: 520; font-size: 13px; }}
+    input[type=text], input[type=number], select {{
+      width: 100%;
       border: 1px solid var(--border);
-      background: var(--surface); color: var(--text);
+      border-radius: var(--radius-sm);
+      background: #fff;
+      padding: 8px 10px;
+      font: inherit;
+      color: var(--text);
     }}
-    .api-chip:hover {{ background: var(--accent-soft); }}
-    .api-chip-dot {{
-      width: 6px; height: 6px; border-radius: 50%;
-      background: var(--text-muted);
-    }}
-    .api-chip.on {{
-      background: #ecfdf5; color: var(--ok); border-color: #a7f3d0;
-    }}
-    .api-chip.on .api-chip-dot {{ background: var(--ok); }}
-    .api-chip.off {{
-      background: var(--surface-2); color: var(--text-muted);
-    }}
-    .api-chip.off .api-chip-dot {{ background: #9ca3af; }}
+    input:focus, select:focus {{ outline: none; border-color: #374151; box-shadow: 0 0 0 3px rgba(55,65,81,.1); }}
+    .row {{ margin-bottom: 12px; }}
+    .inline-checks {{ display: flex; flex-wrap: wrap; gap: 14px; }}
+    .inline-checks label {{ margin: 0; font-weight: 420; }}
 
-    /* validation badge used inside lab summary */
-    .badge {{ display: inline-block; padding: 2px 10px; border-radius: 999px;
-             font-weight: 500; font-size: 12px; }}
-    .badge-ok {{ background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0; }}
-    .badge-warn {{ background: #fef3c7; color: var(--warn); border: 1px solid #fde68a; }}
+    .file-pickers {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }}
+    .hidden-file {{ position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }}
 
-    /* grids (lab summary) */
-    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
-    .grid-single {{ display: grid; grid-template-columns: 1fr; gap: 12px; }}
-    .summary .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
-    .summary-grid > div {{
-      background: var(--surface-2); border: 1px solid var(--border-soft);
-      border-radius: var(--radius-sm); padding: 12px;
+    .primary-btn, .secondary-link, .secondary-btn, .tertiary {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius-sm);
+      padding: 8px 14px;
+      text-decoration: none;
+      font: inherit;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all .15s ease;
+      white-space: nowrap;
     }}
-    .summary-grid ul {{ padding-left: 18px; margin: 6px 0; }}
-    .summary-grid li {{ font-size: 13px; color: var(--text); }}
-    table.mini {{ width: 100%; border-collapse: collapse; font-size: 12.5px; }}
-    table.mini th {{ font-weight: 500; color: var(--text-muted); }}
-    table.mini th, table.mini td {{ border-bottom: 1px solid var(--border-soft); padding: 5px 6px; text-align: left; }}
+    .primary-btn {{
+      width: 100%;
+      background: var(--primary);
+      color: var(--primary-ink);
+      font-weight: 620;
+      height: 40px;
+    }}
+    .primary-btn:hover {{ background: #000; }}
+    .primary-btn[disabled] {{ background: #9ca3af; cursor: progress; }}
 
-    /* details / advanced options */
-    details {{
-      border: 1px solid var(--border); border-radius: var(--radius-sm);
-      padding: 10px 14px; background: var(--surface-2); margin-top: 6px;
+    .secondary-btn, .secondary-link {{
+      background: #fff;
+      color: var(--text);
+      border-color: var(--border);
+      font-weight: 520;
     }}
-    details > summary {{
-      cursor: pointer; font-weight: 500; font-size: 13.5px;
-      margin-bottom: 6px; list-style: none;
-    }}
-    details > summary::before {{
-      content: "▸"; display: inline-block; margin-right: 6px;
-      color: var(--text-muted); transition: transform .15s;
-    }}
-    details[open] > summary::before {{ transform: rotate(90deg); }}
+    .secondary-btn:hover, .secondary-link:hover {{ background: var(--surface-soft); }}
 
-    /* ---- upload pool ---- */
-    .pool-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
-    .pool-head h2 {{ margin: 0; display: flex; align-items: center; gap: 10px; }}
-    .pool-count {{
-      display: inline-block; padding: 2px 10px;
-      background: var(--accent-soft); color: var(--text); border: 1px solid var(--border);
-      border-radius: 999px; font-size: 12px; font-weight: 500;
-    }}
-    .pool-breakdown {{
-      margin: 8px 0 4px 0; color: var(--text-muted); font-size: 12.5px;
-    }}
-    .pool-warn {{
-      display: block; margin: 6px 0; padding: 8px 10px;
-      background: #fff7ed; color: var(--warn); border: 1px solid #fde68a;
-      border-radius: var(--radius-sm); font-size: 12.5px;
-    }}
-    .pool-list {{ list-style: none; padding: 0; margin: 10px 0 0 0; }}
-    .pool-row {{
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 8px 4px; border-bottom: 1px solid var(--border-soft);
-    }}
+    .tertiary {{ background: transparent; border-color: var(--border); color: var(--text-muted); font-size: 12px; padding: 7px 10px; }}
+    .tertiary:hover {{ background: var(--surface-soft); color: var(--text); }}
+    .tertiary.danger {{ color: var(--danger); border-color: #fecaca; }}
+    .tertiary.danger:hover {{ background: #fff1f2; }}
+    .disabled-action {{ display: inline-flex; align-items: center; border: 1px dashed var(--border); color: var(--text-muted); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; }}
+
+    .actions-row {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }}
+
+    .pool-list {{ list-style: none; margin: 8px 0 0; padding: 0; }}
+    .pool-row {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f1f5f9; }}
     .pool-row:last-child {{ border-bottom: 0; }}
-    .pool-pick {{
-      display: flex; align-items: center; gap: 10px; margin: 0;
-      font-weight: 400; font-size: 13.5px;
-      flex: 1 1 auto; cursor: pointer; min-width: 0;
-    }}
+    .pool-pick {{ display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; margin: 0; }}
     .pool-pick input[type=checkbox] {{ margin: 0; }}
-    .pool-name {{ font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-    .pool-meta {{ color: var(--text-muted); font-size: 12px; flex-shrink: 0; }}
-    .pool-remove {{ margin: 0; flex-shrink: 0; }}
-    .type-pill {{
-      display: inline-block; min-width: 40px; text-align: center;
-      padding: 2px 8px; border-radius: 4px;
-      background: var(--accent-soft); color: var(--text); border: 1px solid var(--border);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px; font-weight: 500; text-transform: lowercase;
-      flex-shrink: 0;
-    }}
-    .type-pill.type-img {{
-      background: #fef3c7; color: var(--warn); border-color: #fde68a;
-    }}
-    .warn-text {{ color: var(--warn); font-size: 12.5px; }}
+    .pool-name {{ max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 520; }}
+    .pool-meta {{ color: var(--text-muted); font-size: 12px; white-space: nowrap; }}
+    .file-status {{ color: var(--text-muted); font-size: 11px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }}
+    .file-status.selected {{ color: var(--ok); border-color: #a7f3d0; background: #ecfdf5; }}
+    .pool-remove {{ margin: 0; }}
+    .link-btn {{ border: 0; background: transparent; color: var(--danger); text-decoration: underline; cursor: pointer; font-size: 12px; }}
+    .type-pill {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; border: 1px solid var(--border); border-radius: 4px; background: #f8fafc; color: var(--text-muted); padding: 1px 6px; }}
+    .type-pill.type-img {{ background: #fffbeb; border-color: #fde68a; color: var(--warn); }}
+    .pool-warn {{ margin: 8px 0 0; color: var(--warn); font-size: 12px; }}
 
-    /* ---- download buttons (prod mode) ---- */
-    .download-row {{
-      display: flex; flex-wrap: wrap; gap: 8px;
-      margin-top: 4px;
-    }}
-    .download-btn {{
-      display: inline-flex; align-items: center; gap: 8px;
-      padding: 8px 14px; font-weight: 500;
-      border: 1px solid var(--border); border-radius: var(--radius-sm);
-      background: var(--surface); color: var(--text);
-      text-decoration: none; font-size: 13.5px;
-    }}
-    .download-btn:hover {{ background: var(--accent-soft); }}
-    .download-btn .ext {{
+    .stage-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }}
+    .stage-title {{ font-size: 18px; font-weight: 620; margin: 0; }}
+    .stage-desc {{ margin: 2px 0 0; color: var(--text-muted); }}
+
+    .stats-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; margin-top: 10px; }}
+    .stat {{ border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-soft); padding: 8px 10px; }}
+    .stat .k {{ display: block; color: var(--text-muted); font-size: 12px; }}
+    .stat .v {{ display: block; font-weight: 650; font-size: 18px; line-height: 1.2; margin-top: 2px; }}
+
+    .steps {{ list-style: none; padding: 0; margin: 10px 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }}
+    .step {{ font-size: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; display: flex; align-items: center; gap: 6px; color: var(--text-muted); }}
+    .step .dot {{ width: 7px; height: 7px; border-radius: 50%; background: #d1d5db; }}
+    .step.done {{ color: var(--ok); border-color: #a7f3d0; background: #ecfdf5; }}
+    .step.done .dot {{ background: var(--ok); }}
+    .step.error {{ color: var(--danger); border-color: #fecaca; background: #fef2f2; }}
+    .step.error .dot {{ background: var(--danger); }}
+
+    .log-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }}
+    .log-grid ul {{ margin: 0; padding-left: 18px; }}
+    .log-grid li {{ font-size: 12px; margin: 2px 0; }}
+
+    .kv-list {{ list-style: none; margin: 0 0 10px; padding: 0; }}
+    .kv-list li {{ padding: 4px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px; }}
+    .kv-list li:last-child {{ border-bottom: 0; }}
+
+    .result-actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }}
+    .download-row {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .download-btn {{ display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; text-decoration: none; color: var(--text); background: #fff; }}
+    .download-btn:hover {{ background: var(--surface-soft); }}
+    .download-btn .ext {{ font-size: 11px; color: var(--text-muted); background: #f3f4f6; border-radius: 4px; padding: 1px 5px; }}
+    .download-missing {{ display: inline-flex; border: 1px dashed var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 8px 12px; font-size: 12px; }}
+
+    .grid-two {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+    details {{ border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--surface-soft); }}
+    details > summary {{ cursor: pointer; font-weight: 520; font-size: 13px; }}
+
+    pre {{
+      margin: 0;
+      border: 1px solid #eef2f7;
+      background: #f8fafc;
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      white-space: pre-wrap;
+      word-break: break-word;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px; color: var(--text-muted);
-      padding: 1px 6px; border-radius: 4px; background: var(--accent-soft);
-    }}
-    .download-missing {{
-      display: inline-flex; align-items: center;
-      padding: 8px 14px; font-size: 13.5px; color: var(--text-muted);
-      border: 1px dashed var(--border); border-radius: var(--radius-sm);
+      font-size: 12px;
+      line-height: 1.5;
+      max-height: 380px;
+      overflow: auto;
     }}
 
-    /* ---- responsive ---- */
-    @media (max-width: 720px) {{
-      body {{ padding: 20px 14px 48px; font-size: 14px; }}
-      .card {{ padding: 16px; }}
-      .grid, .summary .summary-grid {{ grid-template-columns: 1fr; }}
+    .mode-badge {{ display: inline-flex; border: 1px solid #fde68a; background: #fffbeb; color: var(--warn); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 520; }}
+    .api-chip {{ display: inline-flex; align-items: center; gap: 6px; text-decoration: none; border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 11px; color: var(--text); background: #fff; }}
+    .api-chip:hover {{ background: var(--surface-soft); }}
+    .api-chip-dot {{ width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; }}
+    .api-chip.on {{ color: var(--ok); border-color: #a7f3d0; background: #ecfdf5; }}
+    .api-chip.on .api-chip-dot {{ background: var(--ok); }}
+
+    @media (max-width: 1080px) {{
+      .layout {{ grid-template-columns: 1fr; }}
+      .stats-grid, .steps, .grid-two, .log-grid {{ grid-template-columns: 1fr; }}
       .pool-meta {{ display: none; }}
+      .pool-name {{ max-width: 170px; }}
     }}
   </style>
   <script>
     document.addEventListener("DOMContentLoaded", function () {{
-      var form = document.querySelector("form[action='/run']");
+      var form = document.getElementById("runForm");
+      var pickFile = document.getElementById("upload_files");
+      var pickFolder = document.getElementById("upload_folder");
+      var pickedHint = document.getElementById("pickedHint");
+      var resetPickedBtn = document.getElementById("resetPickedBtn");
+
+      function updatePickedHint() {{
+        var total = 0;
+        if (pickFile && pickFile.files) total += pickFile.files.length;
+        if (pickFolder && pickFolder.files) total += pickFolder.files.length;
+        if (!pickedHint) return;
+        pickedHint.textContent = total > 0 ? ("已选择 " + total + " 个待上传文件") : "尚未选择本次新上传文件";
+      }}
+
+      if (pickFile) pickFile.addEventListener("change", updatePickedHint);
+      if (pickFolder) pickFolder.addEventListener("change", updatePickedHint);
+      if (resetPickedBtn) {{
+        resetPickedBtn.addEventListener("click", function () {{
+          if (pickFile) pickFile.value = "";
+          if (pickFolder) pickFolder.value = "";
+          updatePickedHint();
+        }});
+      }}
+      updatePickedHint();
+
       if (!form) return;
       form.addEventListener("submit", function () {{
-        var btn = form.querySelector("button[type=submit]");
+        var btn = document.getElementById("submitBtn");
         if (btn) {{
           btn.disabled = true;
           btn.textContent = "处理中，请稍候…";
         }}
-        var wrap = document.querySelector(".wrap");
-        if (wrap) {{
-          var status = document.createElement("div");
-          status.className = "status";
-          status.textContent = "{html.escape(run_status_text)}";
-          wrap.insertBefore(status, wrap.firstChild);
+        var slot = document.getElementById("runtimeStatusSlot");
+        if (slot) {{
+          slot.innerHTML = '<div class="status">流水线执行中：读取 → 切分 → 主题粗分类 → 内容分类 → 总结 → 校验 → 导出…</div>';
         }}
       }});
     }});
@@ -1271,47 +1321,231 @@ def _render_page(
 <body>
   <div class="wrap">
     <header class="app-header">
-      <h1>{page_title}{mode_badge}{_api_status_chip()}</h1>
+      <h1>KnowledgeHarness {mode_badge} {_api_status_chip()}</h1>
       <p class="subtitle">{html.escape(page_subtitle)}</p>
     </header>
 
-    <section class="card">
+    <div class="global-msg">
       {flash_html}
       {error_html}
-      <form id="runForm" method="post" action="/run" enctype="multipart/form-data">
-        <input type="hidden" name="ui_mode" value="{ 'lab' if lab_mode else 'prod' }" />
-        <div class="row">
-          <label for="upload_files">上传资料</label>
-          <input id="upload_files" type="file" name="upload_files" multiple />
-          <p class="hint">
-            支持 txt / md / pdf / docx，以及可选 OCR 图片 png / jpg / jpeg。
-            上限：{MAX_TOTAL_FILES_PER_RUN} 个文件 · 图片 ≤ {MAX_IMAGE_COUNT_PER_RUN} 张 · 单文件 ≤ {_format_size(MAX_FILE_SIZE_BYTES)}。
-            上传后会保留在历史列表中，下次不用重传。
-          </p>
-        </div>
+      <div id="runtimeStatusSlot"></div>
+    </div>
 
-        <div class="grid-single">
-          <div class="row">
-            <label for="output_dir">输出目录</label>
-            <input id="output_dir" type="text" name="output_dir" value="{html.escape(output_dir)}" />
-            <p class="hint">
-              相对路径基于项目根 <code>{html.escape(str(ROOT))}</code>；本次将写入
-              <code>{html.escape(str(_resolve_output_dir(output_dir)))}</code>。
-              {_download_support_hint(output_dir)}
-            </p>
+    <div class="layout">
+      <main class="left-col">
+        <section class="card left-card">
+          <h2>输入与控制</h2>
+          <p class="hint">先导入文件，再确认输出目录与选项，最后点击“{submit_button_label}”。</p>
+          <div class="support-tags">
+            <span class="tag">支持 .txt</span>
+            <span class="tag">支持 .md</span>
+            <span class="tag">支持 .pdf</span>
+            <span class="tag">支持 .docx</span>
+            <span class="tag">图片 OCR: .png/.jpg/.jpeg</span>
           </div>
-        </div>
+        </section>
 
-        {controls_html}
-        <div class="row" style="margin-top: 18px; margin-bottom: 0;">
-          <button type="submit">{submit_button_label}</button>
-          <a class="button-link" href="/settings">API 设置</a>
-          {lab_switch_html}
-        </div>
-      </form>
-    </section>
-    {pool_card_html}
-    {result_html}
+        <form id="runForm" method="post" action="/run" enctype="multipart/form-data">
+          <input type="hidden" name="ui_mode" value="{'lab' if lab_mode else 'prod'}" />
+
+          <section class="card left-card">
+            <h2>文件导入</h2>
+            <div class="file-pickers">
+              <label class="secondary-btn" for="upload_files">选择文件</label>
+              <label class="secondary-btn" for="upload_folder">选择文件夹</label>
+              <button id="resetPickedBtn" type="button" class="tertiary">重置本次选择</button>
+            </div>
+            <input id="upload_files" class="hidden-file" type="file" name="upload_files" multiple />
+            <input id="upload_folder" class="hidden-file" type="file" name="upload_files" webkitdirectory directory multiple />
+            <p id="pickedHint" class="hint">尚未选择本次新上传文件</p>
+            <p class="hint">单次上限：文件 ≤ {MAX_TOTAL_FILES_PER_RUN} 个；图片 ≤ {MAX_IMAGE_COUNT_PER_RUN} 张；单文件 ≤ {_format_size(MAX_FILE_SIZE_BYTES)}。</p>
+          </section>
+
+          <section class="card left-card">
+            <h2>输出与运行选项</h2>
+            <div class="row">
+              <label for="output_dir">输出目录</label>
+              <input id="output_dir" type="text" name="output_dir" value="{html.escape(output_dir)}" />
+              <p class="hint">本次输出路径：<code>{html.escape(str(resolved_output_dir))}</code>{_download_support_hint(output_dir)}</p>
+            </div>
+            {controls_html}
+          </section>
+
+          <section class="card left-card">
+            <h2>开始执行</h2>
+            <button id="submitBtn" class="primary-btn" type="submit">{submit_button_label}</button>
+            <div class="actions-row">
+              <a class="secondary-link" href="/settings">API 设置</a>
+              {lab_switch_html}
+            </div>
+          </section>
+        </form>
+
+        {pool_list_html}
+      </main>
+
+      <aside class="right-col">
+        <section class="card right-card">
+          <div class="stage-head">
+            <div>
+              <p class="stage-title">{html.escape(stage_title)}</p>
+              <p class="stage-desc">{html.escape(stage_desc)}</p>
+            </div>
+          </div>
+
+          <div class="stats-grid">
+            <div class="stat"><span class="k">成功数</span><span class="v">{succeeded}</span></div>
+            <div class="stat"><span class="k">失败数</span><span class="v">{failed}</span></div>
+            <div class="stat"><span class="k">空文本数</span><span class="v">{empty_extracted}</span></div>
+            <div class="stat"><span class="k">处理文件数</span><span class="v">{detected}</span></div>
+          </div>
+
+          <ul class="steps">{stage_steps_html}</ul>
+        </section>
+
+        <section class="card right-card">
+          <h2>告警与日志摘要</h2>
+          <div class="log-grid">
+            <div>
+              <h3>关键告警</h3>
+              <ul>{warnings_html}</ul>
+            </div>
+            <div>
+              <h3>Pipeline Notes</h3>
+              <ul>{notes_html}</ul>
+            </div>
+          </div>
+        </section>
+
+        {result_summary_html}
+      </aside>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def _render_output_browser_page(raw_dir: str, *, lab_mode: bool = False) -> str:
+    resolved = _resolve_output_dir(raw_dir or "outputs")
+    back_href = "/lab" if lab_mode else "/"
+
+    rows: List[str] = []
+    warning = ""
+    if not resolved.exists():
+        warning = f"输出目录不存在：{resolved}"
+    elif not resolved.is_dir():
+        warning = f"输出路径不是目录：{resolved}"
+    else:
+        entries = sorted(
+            list(resolved.iterdir()),
+            key=lambda p: (0 if p.is_file() else 1, -p.stat().st_mtime, p.name.lower()),
+        )
+        for p in entries[:300]:
+            try:
+                stat = p.stat()
+                mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
+                size_text = "-" if p.is_dir() else _format_size(int(stat.st_size))
+            except OSError:
+                mtime = "-"
+                size_text = "-"
+            if p.is_dir():
+                rows.append(
+                    "<tr>"
+                    f"<td>{html.escape(p.name)}</td>"
+                    "<td>目录</td>"
+                    f"<td>{html.escape(size_text)}</td>"
+                    f"<td>{html.escape(mtime)}</td>"
+                    "<td>（目录）</td>"
+                    "</tr>"
+                )
+                continue
+
+            download_name = ""
+            try:
+                rp = p.resolve()
+                rp.relative_to(OUTPUT_WHITELIST_ROOT)
+                if rp.parent == OUTPUT_WHITELIST_ROOT:
+                    download_name = rp.name
+            except Exception:
+                download_name = ""
+
+            action = (
+                f'<a href="/download?name={html.escape(download_name)}" download>下载</a>'
+                if download_name
+                else '<span style="color:#6b7280">不可下载（路径不在 outputs 根目录）</span>'
+            )
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(p.name)}</td>"
+                "<td>文件</td>"
+                f"<td>{html.escape(size_text)}</td>"
+                f"<td>{html.escape(mtime)}</td>"
+                f"<td>{action}</td>"
+                "</tr>"
+            )
+
+    table_html = (
+        "<table><thead><tr><th>名称</th><th>类型</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>"
+        f"<tbody>{''.join(rows) if rows else '<tr><td colspan=5>（无文件）</td></tr>'}</tbody></table>"
+    )
+    warning_html = (
+        f'<p class="warn">{html.escape(warning)}</p>'
+        if warning
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>输出目录 · KnowledgeHarness</title>
+  <style>
+    body {{
+      margin: 0;
+      padding: 24px;
+      background: #f8fafc;
+      color: #111827;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial,
+                   "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+    }}
+    .wrap {{ max-width: 980px; margin: 0 auto; }}
+    .card {{
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.08);
+      padding: 16px;
+    }}
+    h1 {{ margin: 0 0 8px 0; font-size: 22px; }}
+    p {{ margin: 6px 0; }}
+    .hint {{ color: #6b7280; font-size: 13px; }}
+    .warn {{ color: #b45309; background: #fff7ed; border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px; }}
+    .actions {{ margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; }}
+    .btn {{
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid #d1d5db; border-radius: 8px;
+      padding: 7px 12px; text-decoration: none; color: #111827; background: #fff;
+      font-size: 13px;
+    }}
+    .btn:hover {{ background: #f3f4f6; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    th, td {{ border-bottom: 1px solid #eef2f7; padding: 8px; text-align: left; }}
+    th {{ color: #6b7280; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>输出目录</h1>
+      <p class="hint">当前目录：<code>{html.escape(str(resolved))}</code></p>
+      <p class="hint">说明：浏览器“下载”仅支持 <code>outputs/</code> 根目录下的文件。</p>
+      {warning_html}
+      <div class="actions">
+        <a class="btn" href="{back_href}">返回主界面</a>
+      </div>
+      {table_html}
+    </div>
   </div>
 </body>
 </html>"""
@@ -1421,12 +1655,17 @@ def _render_settings_page(
 
     unified_url = (envs.get("KNOWLEDGEHARNESS_API_URL") or os.getenv("KNOWLEDGEHARNESS_API_URL", "")).strip()
     topic_url = (envs.get("TOPIC_CLASSIFIER_API_URL") or os.getenv("TOPIC_CLASSIFIER_API_URL", "")).strip()
+    image_url = (envs.get("IMAGE_OCR_API_URL") or os.getenv("IMAGE_OCR_API_URL", "")).strip()
     web_url = (envs.get("WEB_ENRICHMENT_API_URL") or os.getenv("WEB_ENRICHMENT_API_URL", "")).strip()
-    configured_modules = int(bool(topic_url or unified_url)) + int(bool(web_url or unified_url))
+    configured_modules = (
+        int(bool(topic_url or unified_url))
+        + int(bool(image_url or unified_url))
+        + int(bool(web_url or unified_url))
+    )
     advanced_configured = sum(
         1 for k, _, _ in MODULE_OVERRIDE_KEYS if (envs.get(k) or os.getenv(k, "")).strip()
     )
-    status_label = "Ready" if configured_modules == 2 else ("Partial" if configured_modules else "Incomplete")
+    status_label = "Ready" if configured_modules == 3 else ("Partial" if configured_modules else "Incomplete")
     status_badge = (
         "status-ready" if status_label == "Ready"
         else ("status-partial" if status_label == "Partial" else "status-incomplete")
@@ -1621,7 +1860,7 @@ def _render_settings_page(
     <section class="status-bar">
       <div class="status-item">当前激活档案：<b>{html.escape(active_profile or "未指定")}</b></div>
       <div class="status-item">已保存档案：<b>{len(names)}</b></div>
-      <div class="status-item">模块就绪：<b>{configured_modules}/2</b></div>
+      <div class="status-item">模块就绪：<b>{configured_modules}/3</b></div>
       <div class="status-item">最近连通性测试：<b>未执行</b></div>
       <div class="status-item">环境状态：<b class="{status_badge}">{status_label}</b></div>
     </section>
@@ -1881,6 +2120,16 @@ class _Handler(BaseHTTPRequestHandler):
         if route == "/download":
             self._serve_download(parsed.query)
             return
+        if route == "/outputs":
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            out_dir = (params.get("dir") or ["outputs"])[0]
+            self._write_html(_render_output_browser_page(out_dir, lab_mode=False))
+            return
+        if route == "/lab/outputs" and LAB_ENABLED:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            out_dir = (params.get("dir") or ["outputs"])[0]
+            self._write_html(_render_output_browser_page(out_dir, lab_mode=True))
+            return
         self._write_html("<h1>未找到页面</h1>", status=404)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -2037,7 +2286,6 @@ class _Handler(BaseHTTPRequestHandler):
             mode = (form_raw.get("ui_mode") or ["prod"])[0]
             removed = _clear_upload_pool()
             # POST-redirect-GET so refresh doesn't re-submit.
-            from urllib.parse import quote
             target = "/lab" if mode == "lab" else "/"
             self._redirect(f"{target}?flash={quote(f'已清空文件池，移除 {removed} 个文件')}")
             return
@@ -2048,7 +2296,6 @@ class _Handler(BaseHTTPRequestHandler):
             form_raw = parse_qs(payload, keep_blank_values=True)
             name = (form_raw.get("name") or [""])[0].strip()
             mode = (form_raw.get("ui_mode") or ["prod"])[0]
-            from urllib.parse import quote
             target = _validate_pool_file(name)
             if target is None:
                 self._redirect(f"{'/lab' if mode == 'lab' else '/'}?flash={quote('删除失败：文件名不合法或不存在')}")
@@ -2108,6 +2355,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "export_docx": "export_docx" in fields,
                 "keypoint_min_confidence": _first("keypoint_min_confidence", "0.0"),
                 "keypoint_max_points": _first("keypoint_max_points", "12"),
+                "validation_profile": _first("validation_profile", "strict"),
             }
         else:
             payload = self.rfile.read(total_len).decode("utf-8", errors="replace")
@@ -2124,6 +2372,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "export_docx": "export_docx" in form_raw,
                 "keypoint_min_confidence": (form_raw.get("keypoint_min_confidence") or ["0.0"])[0],
                 "keypoint_max_points": (form_raw.get("keypoint_max_points") or ["12"])[0],
+                "validation_profile": (form_raw.get("validation_profile") or ["strict"])[0],
             }
 
         # Resolve existing pool selections to absolute paths (skip anything
@@ -2210,17 +2459,23 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError(f"未找到 API 档案：{selected_profile_name}")
 
             def _run() -> Dict[str, Any]:
-                return run_pipeline(
-                    files,
-                    output_dir=str(_resolve_output_dir(str(form.get("output_dir", "")))),
+                run_kwargs, _meta = build_pipeline_run_kwargs(
+                    config_path="config/pipeline_config.json",
                     topic_mode=str(form["topic_mode"] or "auto"),
                     web_enrichment_enabled=bool(form["enable_web_enrichment"]),
                     web_enrichment_mode=str(form["web_enrichment_mode"] or "auto"),
-                    export_docx=bool(form["export_docx"]),
                     api_assist_enabled=bool(form["enable_api_assist"]),
                     keypoint_min_confidence=kp_min,
                     keypoint_max_points=kp_max,
+                    validation_profile=str(form.get("validation_profile", "strict") or "strict"),
+                    export_docx=bool(form["export_docx"]),
+                    full_report=False,
+                )
+                return run_pipeline(
+                    files,
+                    output_dir=str(_resolve_output_dir(str(form.get("output_dir", "")))),
                     notifier=None,
+                    **run_kwargs,
                 )
 
             if selected_profile is not None:
@@ -2271,15 +2526,24 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    _load_local_env(".env")
+    load_local_env(".env")
 
     parser = argparse.ArgumentParser(description="KnowledgeHarness 简易本地界面")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址")
     parser.add_argument("--port", default=8765, type=int, help="监听端口")
+    parser.add_argument(
+        "--max-port-tries",
+        default=30,
+        type=int,
+        help="端口占用时向后尝试的端口数量（含起始端口）",
+    )
     args = parser.parse_args()
 
-    server = create_server(args.host, args.port)
-    print(f"简易界面已启动: http://{args.host}:{args.port}")
+    server = create_server(args.host, args.port, max_port_tries=args.max_port_tries)
+    resolved_host, resolved_port = server.server_address[:2]
+    if int(resolved_port) != int(args.port):
+        print(f"端口 {args.port} 已被占用，已自动切换到 {resolved_port}")
+    print(f"简易界面已启动: http://{resolved_host}:{resolved_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -2288,13 +2552,42 @@ def main() -> None:
         server.server_close()
 
 
-def create_server(host: str, port: int) -> ThreadingHTTPServer:
+def create_server(
+    host: str,
+    port: int,
+    *,
+    auto_fallback: bool = True,
+    max_port_tries: int = 30,
+) -> ThreadingHTTPServer:
     """Create the UI HTTP server.
 
     Exposed for launcher/wrapper modules that want to run the same UI server
     without invoking argparse in `main()`.
+
+    Behavior:
+    - If `auto_fallback=False`, bind exactly `port` and raise on conflict.
+    - If `auto_fallback=True` (default), when `port` is occupied the function
+      will try `port+1 ...` up to `max_port_tries` total attempts.
     """
-    return ThreadingHTTPServer((host, port), _Handler)
+    tries = max(1, int(max_port_tries))
+    if not auto_fallback:
+        return ThreadingHTTPServer((host, int(port)), _Handler)
+
+    last_error: OSError | None = None
+    start = int(port)
+    for candidate in range(start, start + tries):
+        try:
+            return ThreadingHTTPServer((host, candidate), _Handler)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            last_error = exc
+            continue
+
+    raise OSError(
+        errno.EADDRINUSE,
+        f"no available port in range [{start}, {start + tries - 1}]",
+    ) from last_error
 
 
 if __name__ == "__main__":

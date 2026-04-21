@@ -11,6 +11,7 @@
 | Docker | `Dockerfile` | OCR-ready：容器内已装 `tesseract-ocr` + `tesseract-ocr-chi-sim`，同时保留 CLI/API/UI 全部入口 |
 
 所有入口最终都走 `app.run_pipeline`，所以 CLI 上验收过的行为 = 其他面的行为。
+入口参数解析与 `.env` 读取统一通过 `tools/pipeline_runtime.py`，减少跨入口漂移。
 
 ## 主流程
 
@@ -37,7 +38,7 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 - `app.py`
   - 流程编排
   - 输入收集（文件 / 目录 / glob），默认跳过项目元目录（含 `uploads/`）
-  - 读取运行时配置（`config/pipeline_config.json`）
+  - 通过 `tools/pipeline_runtime.py` 读取运行时配置（`config/pipeline_config.json`）并解析最终运行参数
   - 自动加载项目根 `.env`（不覆盖已存在的系统环境变量）
   - API 协助编排：默认关闭；仅在显式开启时允许 auto 模式使用外部 API
   - 汇总统一 `result`，分离 `review_needed` 与 `pipeline_notes`
@@ -47,11 +48,13 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - FastAPI 最小服务入口
   - 暴露 `/health`、`/pipeline/run`、`/pipeline/capabilities`
   - 服务层只做请求封装，不改动核心流水线语义
+  - 与 CLI 共用 `build_pipeline_run_kwargs`（请求缺省字段会继承 runtime config）
 
 - `service/flask_server.py`
   - Flask 最小服务入口
   - 暴露 `/health`、`/pipeline/run`、`/pipeline/capabilities`
   - 请求字段默认值与 `service/api_server.py` 对齐，服务层不分叉核心逻辑
+  - 与 CLI/FastAPI 共用 `build_pipeline_run_kwargs`（避免参数策略漂移）
 
 - `launch_app.py`
   - 桌面启动器：启动 `service/simple_ui.py` 同款 UI 服务并自动打开浏览器
@@ -59,16 +62,22 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 
 - `service/simple_ui.py`
   - 基于 stdlib `http.server` 的本地 Web UI，**零第三方依赖**（不使用已废弃的 `cgi` 模块）
-  - 路由：`GET /`、`GET /settings`、`POST /run`、`POST /settings`、`POST /uploads/clear`、`POST /uploads/remove`、`GET /download?name=…`
+  - 命令行直启时支持端口占用自动回退（默认向后尝试 30 个端口）
+  - 路由：`GET /`、`GET /settings`、`GET /outputs`、`POST /run`、`POST /settings`、`POST /uploads/clear`、`POST /uploads/remove`、`GET /download?name=…`
+  - 主页面信息架构：左栏输入与控制（导入/输出/选项/主按钮）+ 右栏状态与结果（阶段/统计/告警/结果入口）
+  - 按钮分层：主按钮（开始整理）> 二级按钮（选择文件/选择文件夹/API 设置/打开结果/打开目录）> 次级治理动作（重置/清空/删除）
   - 文件池（`uploads/ui_uploads/`）+ 类型 pill + 计数汇总；prev 上传可勾选重跑
   - 上传四重限额：图片数 / 总数 / 单文件大小 / 请求体大小
   - `/download` 严格限制在 `<ROOT>/outputs/` 下；双层校验（正则白名单 + `Path.relative_to`）
+  - `/outputs` 为输出目录只读浏览页；下载动作仍必须回到 `/download` 白名单路径
   - `/settings` 密钥字段永不回显，只展示 masked 状态（末 4 位）；留空提交=保持原值
   - 相对输出目录以 `ROOT` 为基准解析，UI 实时显示"本次将写入"的绝对路径
+  - `/run` 调用前先走共享运行时解析，确保 UI 与 CLI/API 的默认参数行为一致
 
 - `tools/parse_inputs.py`
   - 输入标准化为文档对象
-  - 支持 txt / md / pdf / docx；图片 `.png/.jpg/.jpeg` 走 opt-in OCR，缺失依赖时降级为 `ocr_backend_unavailable`
+  - 支持 txt / md / pdf / docx；图片 `.png/.jpg/.jpeg` 走 opt-in OCR
+  - 图片路径：优先本地 OCR；在 `api_assist` 显式开启且 API 可用时可走图片 API OCR 增强；失败降级不崩溃
   - docx heading 样式感知：注入 `heading_path` 到段落文本
   - 失败文件不阻断全流程，进入 `logs.failed_sources`，条目携带 `reason`
   - 正文为空的文件进入 `logs.empty_extracted_sources`
@@ -80,6 +89,11 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - 加载 `config/pipeline_config.json`
   - 深度合并默认配置，失败时降级并输出 warning
 
+- `tools/pipeline_runtime.py`
+  - 统一 `.env` 读取（不覆盖已有系统环境变量）
+  - 统一 API 配置探针（topic/web/any）
+  - 统一构建 `run_pipeline` 参数：runtime config + 每入口覆盖值
+
 - `tools/chunk_notes.py`
   - 文档 → chunks（段落→句→字符三级 fallback）
   - 继承来源信息并生成 `chunk_id`
@@ -89,6 +103,7 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - 关键词 + 起始标签双路打分
   - tie-break 走 `CATEGORY_PRIORITY`
   - 低置信度 → `unclassified` + `review_needed`
+  - 可选 API 协助：对低置信度/未分类 chunk 做受约束补判（标签边界不变）
   - 支持通过配置注入关键词/提示词/优先级
 
 - `tools/topic_coarse_classify.py`
@@ -112,6 +127,7 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 
 - `tools/stage_summarize.py`
   - 从分类结果生成三阶段摘要（三键始终存在）
+  - Stage 3 支持可选 API 协助整理（固定结构、失败降级）
 
 - `tools/extract_keypoints.py`
   - 按 `BUCKET_ORDER` + `confidence desc` 组织并去重
@@ -120,6 +136,7 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 
 - `tools/validate_result.py`
   - 对分类与摘要做一致性与完整性校验
+  - 支持 `validation_profile`（`strict/lenient`）阈值分级
   - 消费 parse 层的 failed/empty 记录、web enrichment 资源、语义冲突
 
 - `tools/export_notes.py`
@@ -144,7 +161,9 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
     ingestion_summary,           # detected/supported/unsupported/succeeded/
                                  # empty_extracted/failed/breakdown_by_type/
                                  # supported_extensions_effective/image_extensions_opt_in/
-                                 # ocr_backend
+                                 # ocr_backend/image_api_assist_enabled/
+                                 # image_api_enhance_mode/image_api_attempted/
+                                 # image_api_succeeded/image_api_enhanced
   },
   "source_documents":    [ ... ],
   "topic_classification": {
@@ -184,6 +203,6 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 ## 工程门禁入口
 
 - 推荐在变更完成后执行 `./scripts/run_acceptance_gate.sh`：
-  - 统一跑 7 份 stdlib 测试
+  - 统一跑 9 份 stdlib 测试
   - 统一跑 `samples/demo.md` smoke
   - 统一验证 `result.json` 顶层契约与 demo 有效性
