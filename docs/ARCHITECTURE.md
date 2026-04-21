@@ -179,3 +179,11 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 - 已有最小 FastAPI / Flask 服务入口；生产级鉴权/限流/任务队列未实现
 - 无测试框架层
 - 无高级（NLI/向量）语义冲突检测
+- 全局工程审计与路线维护放在 `docs/ENGINEERING_REVIEW.md`（阶段性更新）
+
+## 工程门禁入口
+
+- 推荐在变更完成后执行 `./scripts/run_acceptance_gate.sh`：
+  - 统一跑 7 份 stdlib 测试
+  - 统一跑 `samples/demo.md` smoke
+  - 统一验证 `result.json` 顶层契约与 demo 有效性

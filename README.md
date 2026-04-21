@@ -85,9 +85,10 @@ python3 service/flask_server.py --port 8001
 | `docs/PROJECT_STATE.md` | **事实权威**：已实现 / 未实现 / 已知问题 |
 | `docs/ACCEPTANCE.md` | **规则权威**：模块级 + 通用 Gate 验收条件 |
 | `docs/ARCHITECTURE.md` | 模块关系与数据契约（顶层 `result` 结构） |
+| `docs/ENGINEERING_REVIEW.md` | 全局工程审计快照（能力覆盖 / 缺陷 / 优化路线） |
 | `docs/HANDOFF.md` | 当前版本交接结论 |
 | `docs/API_SETUP.md` | API 接入最小说明 |
-| `docs/TODO.md` | 未完成事项（当前仅 2 条，均非阻塞） |
+| `docs/TODO.md` | 未完成事项与优化路线（按优先级维护） |
 | `.codex/session_rules.md` | 会话级前置门禁 |
 
 **权威顺序（冲突时）**：`PROJECT_STATE` > `SKILL` / `ACCEPTANCE` > `ARCHITECTURE` / `README` > `project_memory/*`（历史副本，非权威）
@@ -97,6 +98,9 @@ python3 service/flask_server.py --port 8001
 ```bash
 # 7 份 stdlib 测试脚本（不依赖 pytest），含可选依赖的 SKIP 语义
 for t in tests/test_*.py; do python3 "$t"; done
+
+# 一键跑通验收门禁（测试 + demo smoke + result 结构检查）
+./scripts/run_acceptance_gate.sh
 ```
 
 ## MVP 边界

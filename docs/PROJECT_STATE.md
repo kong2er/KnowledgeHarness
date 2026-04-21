@@ -27,6 +27,7 @@ KnowledgeHarness/
 │   ├── ACCEPTANCE.md                # module + general gates
 │   ├── API_SETUP.md                 # API integration minimal spec
 │   ├── ARCHITECTURE.md              # module relations + data contract
+│   ├── ENGINEERING_REVIEW.md        # project-wide engineering audit snapshot
 │   ├── HANDOFF.md                   # handoff conclusions
 │   ├── PROJECT_STATE.md             # this file (truth baseline)
 │   └── TODO.md                      # open items + changelog
@@ -49,7 +50,8 @@ KnowledgeHarness/
 │   ├── flask_server.py              # minimal Flask service entry
 │   └── simple_ui.py                 # local Web UI (stdlib; no 3rd-party framework)
 ├── scripts/
-│   └── build_desktop.py             # pyinstaller packaging script
+│   ├── build_desktop.py             # pyinstaller packaging script
+│   └── run_acceptance_gate.sh       # one-command acceptance gate runner
 ├── tests/                           # 7 stdlib-only scripts, run via `python3 tests/<name>.py`
 │   ├── test_parse_inputs.py
 │   ├── test_stage1_core.py
@@ -211,6 +213,10 @@ KnowledgeHarness/
 - `scripts/build_desktop.py`
   - 通过 PyInstaller 打包桌面可执行文件（`dist/`）
 
+- `scripts/run_acceptance_gate.sh`
+  - 一键执行验收门禁：7 份测试脚本 + `samples/demo.md` smoke
+  - 自动检查 `result.json` 顶层必需键与 `validation.is_valid == True`
+
 - `tests/test_parse_inputs.py`
   - 仅覆盖"输入扩展与上传告知"模块的核心路径（不含 pytest 依赖，可直接 `python3` 运行）
   - 用例：extension surface / unsupported / empty / file_not_found / docx happy / OCR 缺失降级 / notifier 事件流 / encrypted pdf parse_error / docx heading_path 注入
@@ -245,7 +251,7 @@ KnowledgeHarness/
   `test_parse_inputs.py` / `test_stage1_core.py` / `test_topic_coarse_classify.py` /
   `test_phase2_features.py` / `test_phase3_non_api.py` / `test_api_service_entry.py` /
   `test_flask_service_entry.py`
-  合计 **74 条用例 + 1 条可选 FastAPI 入口断言**（fastapi 缺失时该条自动 SKIP，pypdf 缺失时 parse_inputs 最多 SKIP 2 条）
+  合计 **82 条用例（含可选依赖 SKIP 语义）**（fastapi 缺失时 API 入口测试为 SKIP，pypdf 缺失时 parse_inputs 最多 SKIP 2 条）
 - `service/simple_ui.py` 的 HTTP 层无自动化断言测试，仅在会话内用 curl 做端到端验证；生产级自动化需引入 pytest + httpx 或类似栈
 - 图片 OCR 在默认环境下**不真正执行**（需安装 `requirements-ocr.txt` + `tesseract` 系统二进制）；默认行为是结构化降级，而非"已实现完整 OCR"。容器内（`Dockerfile`）默认可用
 - Topic API 仅提供可选接入点；默认运行不依赖外部 API
@@ -275,3 +281,19 @@ KnowledgeHarness/
 
 本文件只描述仓库当前真实状态。未实现能力不得写成"已实现"。
 若文档与代码冲突：先修正其中一方以恢复一致，再继续开发。
+
+## 7) Engineering Snapshot (2026-04-21)
+
+参考总览：`docs/ENGINEERING_REVIEW.md`。
+
+当日审计结果（命令与结果已固化在 ENGINEERING_REVIEW）：
+
+- 全量 `tests/test_*.py` 通过（含可选依赖 SKIP 语义）。
+- `samples/demo.md` 与 `samples/` 混合输入：`validation.is_valid=True`。
+- `samples/ingest_demo.docx` / `samples/ingest_demo.png`：流程成功但因严格校验规则触发 warnings（当前设计行为，不是崩溃）。
+
+当前最值得优先优化的方向：
+
+1. validation 策略分级（降低小样本误报）。
+2. UI HTTP 自动化测试补齐。
+3. 真实 API 联调验收闭环（外部依赖到位后执行）。

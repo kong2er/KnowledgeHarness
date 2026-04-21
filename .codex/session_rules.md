@@ -17,9 +17,10 @@
 5. `docs/TODO.md`
 6. `docs/ARCHITECTURE.md`
 7. `docs/HANDOFF.md`
+8. `docs/ENGINEERING_REVIEW.md`
 
 ### 三级记忆（仅补充参考）
-8. `project_memory/*`（历史快照，非权威）
+9. `project_memory/*`（历史快照，非权威）
 
 ### 冲突处理顺序（从高到低）
 1. `docs/PROJECT_STATE.md`（事实）
@@ -139,6 +140,6 @@
 
 任务宣告完成前，必须：
 1. 按 `docs/ACCEPTANCE.md` §3 + 受影响模块 §4 自检
-2. 至少跑通：`python3 app.py samples/demo.md --output-dir outputs --quiet`
+2. 至少跑通：`python3 app.py samples/demo.md --output-dir outputs --quiet`（或 `./scripts/run_acceptance_gate.sh`）
 3. 明确 `validation.is_valid` 与 warnings
 4. 完成对应文档写回（PROJECT_STATE / TODO / HANDOFF / ACCEPTANCE）
