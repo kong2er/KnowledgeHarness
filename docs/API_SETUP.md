@@ -1,6 +1,6 @@
 # API_SETUP
 
-Last Updated: 2026-04-20
+Last Updated: 2026-04-21
 
 本文件只说明当前仓库已实现的最基础 API 接入方式。
 

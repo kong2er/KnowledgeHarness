@@ -6,75 +6,58 @@ Last Updated: 2026-04-21
 
 ```text
 KnowledgeHarness/
+├── app.py                           # CLI entry; orchestrates run_pipeline
+├── launch_app.py                    # one-click UI launcher (auto open browser)
+├── start_ui.sh / start_ui.bat       # platform shims for launch_app.py
+├── README.md / SKILL.md
+├── Dockerfile / .dockerignore       # OCR-ready container
+├── .env.example / .gitignore
+├── requirements.txt                 # core
+├── requirements-ocr.txt             # opt-in OCR backend
+├── requirements-api.txt             # opt-in FastAPI service
+├── requirements-desktop.txt         # opt-in desktop build (pyinstaller)
 ├── .codex/
 │   └── session_rules.md
-├── .gitignore
-├── .env.example
-├── README.md
-├── SKILL.md
-├── launch_app.py                   # one-click launcher (auto open browser)
-├── start_ui.sh
-├── start_ui.bat
-├── requirements-api.txt             # FastAPI service deps (optional)
-├── requirements-desktop.txt         # desktop build deps (optional)
-├── app.py
-├── requirements.txt
-├── requirements-ocr.txt             # opt-in OCR backend
 ├── config/
 │   ├── topic_taxonomy.json          # constrained topic label set
 │   ├── api_payload_templates.json   # default API prompt/payload contract
 │   └── pipeline_config.json         # runtime pipeline config
-├── Dockerfile
-├── .dockerignore
 ├── docs/
-│   ├── ACCEPTANCE.md
-│   ├── API_SETUP.md
-│   ├── ARCHITECTURE.md
-│   ├── HANDOFF.md
-│   ├── PROJECT_STATE.md
-│   └── TODO.md
-├── tools/
-│   ├── __init__.py
-│   ├── parse_inputs.py
-│   ├── chunk_notes.py
-│   ├── classify_notes.py
-│   ├── detect_semantic_conflicts.py
-│   ├── topic_coarse_classify.py
-│   ├── web_enrichment.py
-│   ├── runtime_config.py
-│   ├── stage_summarize.py
-│   ├── extract_keypoints.py
-│   ├── validate_result.py
-│   ├── export_notes.py
-│   └── export_word.py
+│   ├── ACCEPTANCE.md                # module + general gates
+│   ├── API_SETUP.md                 # API integration minimal spec
+│   ├── ARCHITECTURE.md              # module relations + data contract
+│   ├── HANDOFF.md                   # handoff conclusions
+│   ├── PROJECT_STATE.md             # this file (truth baseline)
+│   └── TODO.md                      # open items + changelog
+├── tools/                           # pipeline stages (single responsibility each)
+│   ├── parse_inputs.py              # txt/md/pdf/docx + opt-in OCR + ingestion_summary
+│   ├── chunk_notes.py               # paragraph → sentence → char fallback
+│   ├── runtime_config.py            # pipeline_config.json deep-merge
+│   ├── topic_coarse_classify.py     # document-level topic (constrained labels)
+│   ├── classify_notes.py            # chunk-level content classification
+│   ├── stage_summarize.py           # stage_1 / stage_2 / stage_3
+│   ├── extract_keypoints.py         # priority + confidence + dedup
+│   ├── web_enrichment.py            # off/local/api/auto
+│   ├── detect_semantic_conflicts.py # heuristic conflict detection
+│   ├── validate_result.py           # consumes failed/empty/web/conflict signals
+│   ├── export_notes.py              # JSON + Markdown (final_notes_only | full_report)
+│   └── export_word.py               # result.md → result.docx
 ├── service/
 │   ├── api_server.py                # minimal FastAPI service entry
 │   └── simple_ui.py                 # local Web UI (stdlib; no 3rd-party framework)
 ├── scripts/
 │   └── build_desktop.py             # pyinstaller packaging script
-├── tests/
-│   ├── __init__.py
-│   ├── test_parse_inputs.py         # stdlib-only; runs via `python3 tests/...`
-│   ├── test_topic_coarse_classify.py
+├── tests/                           # 6 stdlib-only scripts, run via `python3 tests/<name>.py`
+│   ├── test_parse_inputs.py
 │   ├── test_stage1_core.py
+│   ├── test_topic_coarse_classify.py
 │   ├── test_phase2_features.py
 │   ├── test_phase3_non_api.py
 │   └── test_api_service_entry.py
-├── samples/
-│   ├── demo.md
-│   ├── ingest_demo.docx             # docx happy path
-│   ├── ingest_demo.png               # image; triggers OCR or degrade
-│   └── unsupported_demo.log          # unsupported_file_type path
-├── uploads/                          # gitignored; UI upload pool
-│   └── ui_uploads/
-├── outputs/                          # gitignored; run artifacts only
-│   ├── result.json
-│   └── result.md
-└── project_memory/                   # historical chat context, non-authoritative
-    ├── 01_readme_baseline.md
-    ├── 02_skill_draft.md
-    ├── 03_mvp_task_constraints.md
-    └── MEMORY_INDEX.md
+├── samples/                         # demo inputs: happy path + OCR path + unsupported path
+├── uploads/ui_uploads/              # gitignored; UI upload pool
+├── outputs/                         # gitignored; run artifacts only
+└── project_memory/                  # historical chat context, non-authoritative
 ```
 
 ## 2) Implemented Modules
