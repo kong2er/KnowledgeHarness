@@ -61,6 +61,7 @@ MODULE_OVERRIDE_KEYS = [
 ]
 ALL_SETTINGS_KEYS = API_ENV_KEYS + [k for k, _, _ in MODULE_OVERRIDE_KEYS]
 
+LAB_ENABLED = os.getenv("KH_UI_ENABLE_LAB", "0").strip() == "1"
 SHOW_LAB_LINK = os.getenv("KH_UI_SHOW_LAB_LINK", "0").strip() == "1"
 
 # ---------------------------------------------------------------------------
@@ -798,7 +799,7 @@ def _render_page(
     controls_html = lab_controls_html if lab_mode else prod_controls_html
     if lab_mode:
         lab_switch_html = '<a class="button-link ghost-link" href="/">切换为对外视图</a>'
-    elif SHOW_LAB_LINK:
+    elif LAB_ENABLED and SHOW_LAB_LINK:
         lab_switch_html = '<a class="button-link ghost-link" href="/lab">进入调试视图</a>'
     else:
         lab_switch_html = ""
@@ -1441,7 +1442,7 @@ class _Handler(BaseHTTPRequestHandler):
         if route == "/":
             self._write_html(_render_page(form={}, flash=flash, lab_mode=False))
             return
-        if route == "/lab":
+        if route == "/lab" and LAB_ENABLED:
             self._write_html(_render_page(form={}, flash=flash, lab_mode=True))
             return
         if route == "/settings":

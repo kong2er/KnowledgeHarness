@@ -6,6 +6,11 @@ Run: python3 tests/test_api_service_entry.py
 from __future__ import annotations
 
 import importlib
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _print_head(title: str) -> None:

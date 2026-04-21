@@ -12,7 +12,9 @@ Last Updated: 2026-04-21
 两者都是可选协助模式。
 未接入 API 时，系统会自动降级，不会中断主流程。
 
-另外，仓库已提供最小 FastAPI 服务入口：`service/api_server.py`。
+另外，仓库已提供最小服务入口：
+- FastAPI：`service/api_server.py`
+- Flask：`service/flask_server.py`
 
 ## 2. 环境配置
 
@@ -142,3 +144,15 @@ uvicorn service.api_server:app --host 0.0.0.0 --port 8000 --reload
   "enable_web_enrichment": false
 }
 ```
+
+## 9. 启动最小服务入口（Flask）
+
+```bash
+pip install -r requirements-flask.txt
+python3 service/flask_server.py --host 0.0.0.0 --port 8001
+```
+
+可用端点：
+- `GET /health`
+- `POST /pipeline/run`
+- `GET /pipeline/capabilities`

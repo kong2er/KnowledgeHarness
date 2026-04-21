@@ -7,7 +7,7 @@
 - **用户资料优先**：本地输入是主数据源，外部补充仅作可选协助
 - **流程化处理**：分类 → 总结 → 提炼 → 校验 → 导出，不是一次性"聊天式总结"
 - **真实性守则**：占位能力如实降级（图片 OCR 缺依赖 → 显式告知，不伪装成功）
-- **同一条流水线 × 4 种调用方式**：CLI / FastAPI / 本地 Web UI / Docker，行为完全一致
+- **同一条流水线 × 5 种调用方式**：CLI / FastAPI / Flask / 本地 Web UI / Docker，行为完全一致
 
 ## 能力概览
 
@@ -18,7 +18,7 @@
 | 摘要 | 三阶段总结（Stage 1/2/3）+ 基于置信度与类别优先级的重点提炼 |
 | 校验 | 未分类比例、重复、阶段缺失、失败源、语义冲突（启发式）、web 资源字段缺失 |
 | 导出 | `result.json` + `result.md`（最终笔记版 / 完整报告版可切换）+ 可选 `result.docx` |
-| 服务层 | FastAPI 最小入口 + 本地 Web UI（stdlib 零依赖，含文件池、四重上传限额、masked API 设置、路径遍历防御） |
+| 服务层 | FastAPI + Flask 最小入口 + 本地 Web UI（stdlib 零依赖，含文件池、四重上传限额、masked API 设置、路径遍历防御） |
 
 ## 快速开始
 
@@ -41,10 +41,17 @@ python3 app.py samples/ --output-dir outputs
 # 本地 Web UI（零第三方依赖，自动打开浏览器）
 python3 launch_app.py
 # 或：./start_ui.sh（Linux/macOS）/ start_ui.bat（Windows）
+# 调试视图 /lab 默认禁用；如需启用：
+# KH_UI_ENABLE_LAB=1 python3 launch_app.py
+# （若还要在首页显示入口，再加 KH_UI_SHOW_LAB_LINK=1）
 
 # FastAPI 服务（可选依赖）
 pip install -r requirements-api.txt
 uvicorn service.api_server:app --port 8000
+
+# Flask 服务（可选依赖）
+pip install -r requirements-flask.txt
+python3 service/flask_server.py --port 8001
 ```
 
 ### 常用 CLI 开关
@@ -86,7 +93,7 @@ uvicorn service.api_server:app --port 8000
 ## 测试
 
 ```bash
-# 6 份 stdlib 测试脚本（不依赖 pytest），合计 70 条用例 + 1 条可选 SKIP
+# 7 份 stdlib 测试脚本（不依赖 pytest），含可选依赖的 SKIP 语义
 for t in tests/test_*.py; do python3 "$t"; done
 ```
 

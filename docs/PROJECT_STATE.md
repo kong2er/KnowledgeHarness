@@ -15,6 +15,7 @@ KnowledgeHarness/
 ├── requirements.txt                 # core
 ├── requirements-ocr.txt             # opt-in OCR backend
 ├── requirements-api.txt             # opt-in FastAPI service
+├── requirements-flask.txt           # opt-in Flask service
 ├── requirements-desktop.txt         # opt-in desktop build (pyinstaller)
 ├── .codex/
 │   └── session_rules.md
@@ -43,17 +44,20 @@ KnowledgeHarness/
 │   ├── export_notes.py              # JSON + Markdown (final_notes_only | full_report)
 │   └── export_word.py               # result.md → result.docx
 ├── service/
+│   ├── __init__.py                  # service package marker
 │   ├── api_server.py                # minimal FastAPI service entry
+│   ├── flask_server.py              # minimal Flask service entry
 │   └── simple_ui.py                 # local Web UI (stdlib; no 3rd-party framework)
 ├── scripts/
 │   └── build_desktop.py             # pyinstaller packaging script
-├── tests/                           # 6 stdlib-only scripts, run via `python3 tests/<name>.py`
+├── tests/                           # 7 stdlib-only scripts, run via `python3 tests/<name>.py`
 │   ├── test_parse_inputs.py
 │   ├── test_stage1_core.py
 │   ├── test_topic_coarse_classify.py
 │   ├── test_phase2_features.py
 │   ├── test_phase3_non_api.py
-│   └── test_api_service_entry.py
+│   ├── test_api_service_entry.py
+│   └── test_flask_service_entry.py
 ├── samples/                         # demo inputs: happy path + OCR path + unsupported path
 ├── uploads/ui_uploads/              # gitignored; UI upload pool
 ├── outputs/                         # gitignored; run artifacts only
@@ -164,6 +168,12 @@ KnowledgeHarness/
   - 复用 `run_pipeline`，保持与 CLI 一致的降级语义
   - 通过 `requirements-api.txt` 进行可选依赖安装
 
+- `service/flask_server.py`
+  - 提供最小 Flask 服务入口（`/health`、`/pipeline/run`、`/pipeline/capabilities`）
+  - 请求字段默认值与 `service/api_server.py` 对齐，便于互换部署
+  - 复用 `run_pipeline`，保持与 CLI/FastAPI 一致的降级语义
+  - 通过 `requirements-flask.txt` 进行可选依赖安装
+
 - `service/simple_ui.py`
   - 基于 `http.server` 的本地 Web UI，**不依赖 Flask / Jinja / cgi**（cgi 在 Python 3.13 已移除）；多部分解析由本模块内的 `_parse_multipart` 提供
   - **文件池**（`uploads/ui_uploads/`）：首次上传后的文件被保留并在 UI 内列出，每条带类型 pill + 大小 + mtime + "删除"按钮；勾选即可再次运行，不需要重上传。顶部有"清空全部"、"共 N 个"胶囊、类型分布行（如 `.docx × 2 · .png × 3 · .md × 1`）
@@ -176,6 +186,7 @@ KnowledgeHarness/
   - **下载端点 `GET /download?name=<basename>`**：严格限制在 `outputs/` 根目录，`name` 白名单正则 + `Path.resolve().relative_to()` 二层校验；任何路径穿越（`../` / 绝对路径 / 子目录）返回 400
   - **API 设置页 `/settings`**：密钥字段使用 `type=password` 且**从不回显当前值**；状态用"已配置（末 4 位：···abcd）"掩码形式呈现；留空提交 = 保持原值，不会误清空
   - **双视图**：`/` 对外使用视图（默认，隐藏测试/调试信息）与 `/lab` 调试视图（显示测试参数与诊断信息）
+  - 调试视图默认禁用：仅 `KH_UI_ENABLE_LAB=1` 时可访问 `/lab`；首页入口还需 `KH_UI_SHOW_LAB_LINK=1`
   - **流程感知 Header（2026-04-21）**：主页标题旁展示 `API 状态` chip，读取 `KNOWLEDGEHARNESS_API_URL` / `TOPIC_CLASSIFIER_API_URL` / `WEB_ENRICHMENT_API_URL` 任一存在即显示"API 已配置"，否则显示"本地模式"；只显示 on/off 状态，**绝不回显任何 URL/Key 值**；点击跳转 `/settings`
   - **完整 API 设置覆盖（2026-04-21）**：`/settings` 现分为"主设置"（`KNOWLEDGEHARNESS_API_URL/KEY`，默认展开）与"按模块覆盖"（`TOPIC_CLASSIFIER_API_URL/KEY/TEMPLATE` + `WEB_ENRICHMENT_API_URL/KEY/TEMPLATE`，默认折叠）；每个字段新增"清空此字段" checkbox，配合 `_write_env_pairs(clears=...)` 把 `.env` 对应行改写为 `KEY=` 形式（保留文件结构）并同步重置当前进程 `os.environ`
   - **专业重设计（2026-04-21，纯视觉）**：统一 CSS token 配色（`--bg/--surface/--text/--accent` 等）、系统字体栈（CJK fallback）、一致圆角（10/6/999）、响应式断点（`max-width: 720px`）；功能未变
@@ -215,14 +226,17 @@ KnowledgeHarness/
 - `tests/test_api_service_entry.py`
   - FastAPI 服务入口存在性检查（fastapi 缺失时 skip）
 
+- `tests/test_flask_service_entry.py`
+  - Flask 服务入口路由、请求解析、健康检查与 400 验证路径检查
+
 ## 3) Not Implemented / Placeholder
 
-- Flask 服务入口未实现（当前仅 FastAPI 最小入口，标记为可选冗余项）
 - API 接口联调待外部接口规范与鉴权信息就绪
-- 全量 pytest 自动化测试套件未建立；当前为 **6 份 stdlib-only 测试脚本**（可直接 `python3 tests/<name>.py` 运行）：
+- 全量 pytest 自动化测试套件未建立；当前为 **7 份 stdlib-only 测试脚本**（可直接 `python3 tests/<name>.py` 运行）：
   `test_parse_inputs.py` / `test_stage1_core.py` / `test_topic_coarse_classify.py` /
-  `test_phase2_features.py` / `test_phase3_non_api.py` / `test_api_service_entry.py`
-  合计 **70 条用例 + 1 条 FastAPI 入口断言**（fastapi 缺失时最后一条自动 SKIP，pypdf 缺失时 parse_inputs 最多 SKIP 2 条）
+  `test_phase2_features.py` / `test_phase3_non_api.py` / `test_api_service_entry.py` /
+  `test_flask_service_entry.py`
+  合计 **74 条用例 + 1 条可选 FastAPI 入口断言**（fastapi 缺失时该条自动 SKIP，pypdf 缺失时 parse_inputs 最多 SKIP 2 条）
 - `service/simple_ui.py` 的 HTTP 层无自动化断言测试，仅在会话内用 curl 做端到端验证；生产级自动化需引入 pytest + httpx 或类似栈
 - 图片 OCR 在默认环境下**不真正执行**（需安装 `requirements-ocr.txt` + `tesseract` 系统二进制）；默认行为是结构化降级，而非"已实现完整 OCR"。容器内（`Dockerfile`）默认可用
 - Topic API 仅提供可选接入点；默认运行不依赖外部 API

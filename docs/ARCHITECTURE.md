@@ -1,15 +1,16 @@
 # ARCHITECTURE
 
-## 交付面板（同一条核心流水线 × 4 种调用方式）
+## 交付面板（同一条核心流水线 × 5 种调用方式）
 
 | 交付面 | 入口 | 定位 |
 |--------|------|------|
 | CLI | `app.py` | 权威入口；所有 flag 与配置由此驱动；所有测试与 Docker 都复用它 |
 | FastAPI | `service/api_server.py` (`/pipeline/run` 等) | 可选依赖（`requirements-api.txt`）；薄包装，不分叉核心逻辑 |
+| Flask | `service/flask_server.py` (`/pipeline/run` 等) | 可选依赖（`requirements-flask.txt`）；请求 schema 与 FastAPI 入口对齐 |
 | Local Web UI | `service/simple_ui.py` | 零第三方依赖（stdlib `http.server`）；文件池、上传限额、下载端点、masked API key |
 | Docker | `Dockerfile` | OCR-ready：容器内已装 `tesseract-ocr` + `tesseract-ocr-chi-sim`，同时保留 CLI/API/UI 全部入口 |
 
-所有 4 种入口最终都走 `app.run_pipeline`，所以 CLI 上验收过的行为 = 其他 3 个面的行为。
+所有入口最终都走 `app.run_pipeline`，所以 CLI 上验收过的行为 = 其他面的行为。
 
 ## 主流程
 
@@ -45,6 +46,11 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - FastAPI 最小服务入口
   - 暴露 `/health`、`/pipeline/run`、`/pipeline/capabilities`
   - 服务层只做请求封装，不改动核心流水线语义
+
+- `service/flask_server.py`
+  - Flask 最小服务入口
+  - 暴露 `/health`、`/pipeline/run`、`/pipeline/capabilities`
+  - 请求字段默认值与 `service/api_server.py` 对齐，服务层不分叉核心逻辑
 
 - `launch_app.py`
   - 桌面启动器：启动 `service/simple_ui.py` 同款 UI 服务并自动打开浏览器
@@ -167,6 +173,6 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
 ## 当前边界
 
 - 外部补充可开关，且失败降级不影响主流程
-- 已有最小 FastAPI 服务入口；Flask 与生产级鉴权/限流/任务队列未实现
+- 已有最小 FastAPI / Flask 服务入口；生产级鉴权/限流/任务队列未实现
 - 无测试框架层
 - 无高级（NLI/向量）语义冲突检测

@@ -2,9 +2,8 @@
 
 Last Updated: 2026-04-21
 
-## 仍未完成（2 项，均非阻塞）
+## 仍未完成（1 项，非阻塞）
 
-- [ ] **提供 Flask 最小服务入口** — 可选冗余项；FastAPI 已覆盖同一核心流水线。若真要做，可仿照 `service/api_server.py` 写 `service/flask_server.py`。
 - [ ] **API 接口联调** — 阻塞在外部：代码侧 schema / fallback / 越界拒绝 / 重试 / masked 密钥管理全部就位，等真实 API URL 与鉴权信息即可接。
 
 ---
@@ -29,6 +28,7 @@ Last Updated: 2026-04-21
 - [x] 主页流程感知 Header：`API 状态` chip，只显 on/off，永不回显值（`b58fa67`）
 - [x] `/settings` 完整 API 覆盖：按模块覆盖折叠栏 + 每字段"清空此字段" checkbox + `_write_env_pairs(clears=...)` 语义（`b58fa67`）
 - [x] 治理文档同步基线：六份文档与代码对齐（`af81467`）
+- [x] Flask 最小服务入口 + 入口测试（`service/flask_server.py` / `tests/test_flask_service_entry.py`）
 
 ### 2026-04-20 · MVP 主体交付
 
@@ -44,7 +44,7 @@ Last Updated: 2026-04-21
 - [x] 输入阶段结构化告知：notifier 事件流 + `ingestion_summary`
 - [x] 失败源 schema：`reason` ∈ `{unsupported_file_type, file_not_found, parse_error, ocr_backend_unavailable}`
 - [x] Topic Coarse Classification 层（受约束标签 + 可选 API + 降级）
-- [x] 核心测试覆盖：6 份 stdlib 测试脚本（70 passed + 1 SKIP）
+- [x] 核心测试覆盖：7 份 stdlib 测试脚本（74 passed + 可选 SKIP）
 
 **P1 · 流程完整性**
 - [x] 可开关的最小 web enrichment（`title/url/purpose/relevance_reason` schema）
