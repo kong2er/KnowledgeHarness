@@ -108,6 +108,7 @@ KnowledgeHarness/
 - `tools/web_enrichment.py`
   - 可开关 enrichment（`enabled + off/local/api/auto`）
   - local 模式从用户资料抽取 URL；api/auto 失败回退 local/off
+  - URL 归一化会剥离常见尾随标点（如 `) ] . ,`），避免脏链接进入资源列表
   - 支持 API 协议风格：`custom` 与 `openai_compatible`（DeepSeek/OpenAI 兼容），`auto` 可自动识别并补全 `/v1/chat/completions`
   - 支持 API 重试（`api_retries`）
   - 输出资源 schema：`title/url/purpose/relevance_reason`

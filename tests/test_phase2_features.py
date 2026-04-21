@@ -43,7 +43,10 @@ def test_web_enrichment_local_extracts_urls():
     docs = [
         {
             "source_name": "d.md",
-            "extracted_text": "参考链接 https://example.com/a 和 https://openai.com/research",
+            "extracted_text": (
+                "参考链接 https://example.com/a), "
+                "以及 [https://openai.com/research]."
+            ),
         }
     ]
     out = web_enrich(docs, enabled=True, mode="local", max_items=5)
@@ -56,6 +59,11 @@ def test_web_enrichment_local_extracts_urls():
         _check("schema url", "url" in r and bool(r["url"]), str(r))
         _check("schema purpose", "purpose" in r and bool(r["purpose"]), str(r))
         _check("schema relevance", "relevance_reason" in r and bool(r["relevance_reason"]), str(r))
+        _check(
+            "url punctuation trimmed",
+            all(not item["url"].endswith((")", "]", ".", ",")) for item in resources),
+            str(resources),
+        )
 
 
 def test_validate_web_resource_link_check_only_when_enabled():

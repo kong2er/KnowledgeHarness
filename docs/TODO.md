@@ -22,6 +22,7 @@ Last Updated: 2026-04-21
 
 ### 2026-04-21 · UI 收尾与桌面交付
 
+- [x] 收尾优化：修复 `tools/web_enrichment.py` 的无效转义告警，并补充 URL 末尾标点清洗回归测试（`tests/test_phase2_features.py`）
 - [x] API 协议兼容增强：`custom` + `openai_compatible` 双协议，`auto` 自动识别 DeepSeek/OpenAI 风格并补全 chat-completions endpoint（unreleased）
 - [x] API 协助触发策略收敛：默认关闭，仅用户显式开启（CLI/UI/API 请求）才调用外部 API（unreleased）
 - [x] `/` 对外视图与 `/lab` 调试视图分层，默认隐藏测试参数（`7d2fd23`）

@@ -101,7 +101,8 @@ def _resolve_openai_endpoint(url: str) -> str:
 
 
 def _normalize_url(url: str) -> str:
-    return url.rstrip(".,;:!?)\]}")
+    # Trim trailing punctuation/brackets commonly attached in prose.
+    return url.rstrip(".,;:!?)]}")
 
 
 def _build_local_resources(documents: List[Dict[str, Any]], max_items: int) -> List[Dict[str, str]]:
