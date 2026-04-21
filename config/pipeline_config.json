@@ -24,7 +24,11 @@
     "enabled": false,
     "mode": "auto",
     "timeout_sec": 6.0,
-    "max_items": 8
+    "max_items": 8,
+    "api_retries": 1
+  },
+  "api_assist": {
+    "enabled_by_default": false
   },
   "ocr": {
     "languages": "chi_sim+eng",

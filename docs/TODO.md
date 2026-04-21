@@ -22,6 +22,8 @@ Last Updated: 2026-04-21
 
 ### 2026-04-21 · UI 收尾与桌面交付
 
+- [x] API 协议兼容增强：`custom` + `openai_compatible` 双协议，`auto` 自动识别 DeepSeek/OpenAI 风格并补全 chat-completions endpoint（unreleased）
+- [x] API 协助触发策略收敛：默认关闭，仅用户显式开启（CLI/UI/API 请求）才调用外部 API（unreleased）
 - [x] `/` 对外视图与 `/lab` 调试视图分层，默认隐藏测试参数（`7d2fd23`）
 - [x] 一键启动与桌面打包链路：`launch_app.py` + `scripts/build_desktop.py`（`7d2fd23`）
 - [x] UI 专业视觉体系重构：CSS token / 系统字体栈含 CJK fallback / 一致圆角 / 响应式断点 / focus-ring（`5127194`，功能零改动）

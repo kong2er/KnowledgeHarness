@@ -137,6 +137,70 @@ def test_taxonomy_auto_appends_unknown():
     _check("unknown appended", "unknown_topic" in out["allowed_labels"], str(out["allowed_labels"]))
 
 
+def test_openai_compatible_topic_api():
+    print("[test] openai-compatible topic api")
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "topic_label": "software_engineering",
+                                    "confidence": 0.88,
+                                    "reason": "matched software topic",
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ]
+            }
+            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    captured = {"url": ""}
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        return FakeResp()
+
+    old_urlopen = tc.request.urlopen
+    old_url = os.environ.get("TOPIC_CLASSIFIER_API_URL")
+    old_style = os.environ.get("TOPIC_CLASSIFIER_API_STYLE")
+    os.environ["TOPIC_CLASSIFIER_API_URL"] = "https://api.deepseek.com"
+    os.environ["TOPIC_CLASSIFIER_API_STYLE"] = "openai_compatible"
+    tc.request.urlopen = fake_urlopen
+    try:
+        out = tc.topic_coarse_classify([_doc("软件工程设计模式")], mode="api")
+    finally:
+        tc.request.urlopen = old_urlopen
+        if old_url is None:
+            os.environ.pop("TOPIC_CLASSIFIER_API_URL", None)
+        else:
+            os.environ["TOPIC_CLASSIFIER_API_URL"] = old_url
+        if old_style is None:
+            os.environ.pop("TOPIC_CLASSIFIER_API_STYLE", None)
+        else:
+            os.environ["TOPIC_CLASSIFIER_API_STYLE"] = old_style
+
+    item = out["items"][0]
+    _check("openai mode api used", item["used_api"] is True, str(item))
+    _check("label parsed", item["topic_label"] == "software_engineering", str(item))
+    _check(
+        "endpoint auto completed",
+        captured["url"].endswith("/v1/chat/completions"),
+        captured["url"],
+    )
+
+
 def main():
     print("=" * 60)
     print("Topic coarse classifier: minimal tests")
@@ -146,6 +210,7 @@ def main():
     test_api_out_of_scope_fallbacks_to_local()
     test_api_exception_fallbacks()
     test_taxonomy_auto_appends_unknown()
+    test_openai_compatible_topic_api()
     print("-" * 60)
     print(f"Result: {_passed} passed, {_failed} failed")
     sys.exit(0 if _failed == 0 else 1)

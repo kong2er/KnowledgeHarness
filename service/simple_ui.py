@@ -678,6 +678,7 @@ def _render_page(
     output_dir = str(form.get("output_dir", "outputs"))
     topic_mode = str(form.get("topic_mode", "auto"))
     enable_web = bool(form.get("enable_web_enrichment", False))
+    enable_api_assist = bool(form.get("enable_api_assist", False))
     web_mode = str(form.get("web_enrichment_mode", "auto"))
     kp_min = str(form.get("keypoint_min_confidence", "0.0"))
     kp_max = str(form.get("keypoint_max_points", "12"))
@@ -692,6 +693,11 @@ def _render_page(
     if default_profile not in profile_names:
         default_profile = ""
     api_profile = default_profile
+    has_any_api = bool(
+        os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+        or os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
+        or os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
+    )
     uploaded_files = uploaded_files or []
     pool_selected = pool_selected or set()
 
@@ -868,8 +874,18 @@ def _render_page(
           </div>
         """
 
+    api_assist_hint_html = (
+        '<p class="hint">已检测到 API 配置：默认仍按本地模式运行。勾选“启用 API 协助”后才会调用外部 API（失败自动降级）。</p>'
+        if has_any_api
+        else '<p class="hint">未检测到 API 配置：当前将以本地模式运行。可在“API 设置”中接入后增强结果。</p>'
+    )
+
     prod_controls_html = """
           {profile_select_html}
+          <div class="row">{api_assist_hint_html}</div>
+          <div class="row">
+            <label><input type="checkbox" name="enable_api_assist" {api_assist_checked} /> 启用 API 协助（可选）</label>
+          </div>
           <div class="row">
             <label><input type="checkbox" name="export_docx" {docx_checked} /> 同时导出 Word（.docx）</label>
           </div>
@@ -879,12 +895,15 @@ def _render_page(
           <input type="hidden" name="keypoint_max_points" value="12" />
     """.format(
         docx_checked=_checked(export_docx),
+        api_assist_checked=_checked(enable_api_assist),
         profile_select_html=profile_select_html,
+        api_assist_hint_html=api_assist_hint_html,
     )
 
     lab_controls_html = f"""
           {profile_select_html}
           <div class="row">
+            <label><input type="checkbox" name="enable_api_assist" {_checked(enable_api_assist)} /> 启用 API 协助（默认关闭）</label>
             <label><input type="checkbox" name="enable_web_enrichment" {_checked(enable_web)} /> 启用 Web 补充</label>
             <label><input type="checkbox" name="export_docx" {_checked(export_docx)} /> 同时导出 Word（.docx）</label>
           </div>
@@ -2084,6 +2103,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "api_profile": _first("api_profile", ""),
                 "topic_mode": _first("topic_mode", "auto"),
                 "web_enrichment_mode": _first("web_enrichment_mode", "auto"),
+                "enable_api_assist": "enable_api_assist" in fields,
                 "enable_web_enrichment": "enable_web_enrichment" in fields,
                 "export_docx": "export_docx" in fields,
                 "keypoint_min_confidence": _first("keypoint_min_confidence", "0.0"),
@@ -2099,6 +2119,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "api_profile": (form_raw.get("api_profile") or [""])[0],
                 "topic_mode": (form_raw.get("topic_mode") or ["auto"])[0],
                 "web_enrichment_mode": (form_raw.get("web_enrichment_mode") or ["auto"])[0],
+                "enable_api_assist": "enable_api_assist" in form_raw,
                 "enable_web_enrichment": "enable_web_enrichment" in form_raw,
                 "export_docx": "export_docx" in form_raw,
                 "keypoint_min_confidence": (form_raw.get("keypoint_min_confidence") or ["0.0"])[0],
@@ -2196,6 +2217,7 @@ class _Handler(BaseHTTPRequestHandler):
                     web_enrichment_enabled=bool(form["enable_web_enrichment"]),
                     web_enrichment_mode=str(form["web_enrichment_mode"] or "auto"),
                     export_docx=bool(form["export_docx"]),
+                    api_assist_enabled=bool(form["enable_api_assist"]),
                     keypoint_min_confidence=kp_min,
                     keypoint_max_points=kp_max,
                     notifier=None,

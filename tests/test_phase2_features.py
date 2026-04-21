@@ -16,11 +16,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from app import run_pipeline  # noqa: E402
 from tools.detect_semantic_conflicts import detect_semantic_conflicts  # noqa: E402
 from tools.topic_coarse_classify import topic_coarse_classify  # noqa: E402
 from tools.validate_result import validate_result  # noqa: E402
 from tools.web_enrichment import web_enrich  # noqa: E402
 import tools.topic_coarse_classify as tc  # noqa: E402
+import tools.web_enrichment as we  # noqa: E402
 
 _passed = 0
 _failed = 0
@@ -158,6 +160,96 @@ def test_topic_api_retries():
     _check("retried twice", item["api_attempts"] == 2, str(item))
 
 
+def test_api_assist_explicitly_enables_web_enrichment():
+    print("[test] api assist explicitly enables web enrichment")
+    tmp_dir = PROJECT_ROOT / "outputs" / "_tmp_test_api_assist"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    src = tmp_dir / "demo.md"
+    src.write_text(
+        "机器学习资料，补充链接：https://example.com/guide\n",
+        encoding="utf-8",
+    )
+
+    old_url = os.environ.get("KNOWLEDGEHARNESS_API_URL")
+    old_topic_urlopen = tc.request.urlopen
+    old_web_urlopen = we.request.urlopen
+
+    def fast_fail(req, timeout=0):
+        raise tc.error.URLError("mock no network")
+
+    os.environ["KNOWLEDGEHARNESS_API_URL"] = "http://fake.local/api"
+    tc.request.urlopen = fast_fail
+    we.request.urlopen = fast_fail
+    try:
+        out = run_pipeline(
+            [str(src)],
+            output_dir=str(tmp_dir),
+            web_enrichment_enabled=False,
+            web_enrichment_mode="auto",
+            api_assist_enabled=True,
+        )
+    finally:
+        tc.request.urlopen = old_topic_urlopen
+        we.request.urlopen = old_web_urlopen
+        if old_url is None:
+            os.environ.pop("KNOWLEDGEHARNESS_API_URL", None)
+        else:
+            os.environ["KNOWLEDGEHARNESS_API_URL"] = old_url
+
+    notes = out.get("pipeline_notes") or []
+    resources = out.get("web_resources") or []
+    _check(
+        "auto-enable note present",
+        any("api assist enabled: auto-enabled web enrichment" in n for n in notes),
+        str(notes),
+    )
+    _check("fallback local resources available", len(resources) >= 1, str(resources))
+
+
+def test_api_assist_disabled_keeps_local_mode():
+    print("[test] api assist disabled keeps local mode")
+    tmp_dir = PROJECT_ROOT / "outputs" / "_tmp_test_api_assist_off"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    src = tmp_dir / "demo.md"
+    src.write_text(
+        "机器学习资料，补充链接：https://example.com/guide\n",
+        encoding="utf-8",
+    )
+
+    old_url = os.environ.get("KNOWLEDGEHARNESS_API_URL")
+    old_topic_urlopen = tc.request.urlopen
+    old_web_urlopen = we.request.urlopen
+
+    def should_not_call(req, timeout=0):
+        raise AssertionError("api should not be called when api assist is disabled")
+
+    os.environ["KNOWLEDGEHARNESS_API_URL"] = "http://fake.local/api"
+    tc.request.urlopen = should_not_call
+    we.request.urlopen = should_not_call
+    try:
+        out = run_pipeline(
+            [str(src)],
+            output_dir=str(tmp_dir),
+            web_enrichment_enabled=True,
+            web_enrichment_mode="auto",
+            api_assist_enabled=False,
+        )
+    finally:
+        tc.request.urlopen = old_topic_urlopen
+        we.request.urlopen = old_web_urlopen
+        if old_url is None:
+            os.environ.pop("KNOWLEDGEHARNESS_API_URL", None)
+        else:
+            os.environ["KNOWLEDGEHARNESS_API_URL"] = old_url
+
+    notes = out.get("pipeline_notes") or []
+    _check(
+        "disabled note present",
+        any("api assist disabled" in n for n in notes),
+        str(notes),
+    )
+
+
 def main():
     print("=" * 60)
     print("Phase-2 feature tests")
@@ -166,6 +258,8 @@ def main():
     test_validate_web_resource_link_check_only_when_enabled()
     test_semantic_conflict_detection()
     test_topic_api_retries()
+    test_api_assist_explicitly_enables_web_enrichment()
+    test_api_assist_disabled_keeps_local_mode()
     print("-" * 60)
     print(f"Result: {_passed} passed, {_failed} failed")
     sys.exit(0 if _failed == 0 else 1)

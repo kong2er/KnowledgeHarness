@@ -39,6 +39,7 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - 输入收集（文件 / 目录 / glob），默认跳过项目元目录（含 `uploads/`）
   - 读取运行时配置（`config/pipeline_config.json`）
   - 自动加载项目根 `.env`（不覆盖已存在的系统环境变量）
+  - API 协助编排：默认关闭；仅在显式开启时允许 auto 模式使用外部 API
   - 汇总统一 `result`，分离 `review_needed` 与 `pipeline_notes`
   - `final_notes_only` / `export_docx` 等笔记形态开关
 
@@ -94,6 +95,7 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - documents → topic labels（source/document 粒度）
   - 受本地 taxonomy 约束（`config/topic_taxonomy.json`）
   - 模式：`auto/local/api`
+  - API 协议风格：`custom` / `openai_compatible` / `auto`
   - API 为可选协助；越界标签、超时、错误均降级（local/unknown），并记录 warnings
   - 支持可配置重试次数（默认 1 次重试）
 
@@ -101,6 +103,7 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - 开关式补充资源生成（`off/local/api/auto`）
   - `local` 模式：从用户资料中提取 URL 并结构化
   - `api/auto` 模式：可选外部协助，失败回退 local/off
+  - API 协议风格：`custom` / `openai_compatible` / `auto`
   - 严格资源 schema：`title/url/purpose/relevance_reason`
 
 - `tools/detect_semantic_conflicts.py`

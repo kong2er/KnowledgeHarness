@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from urllib import error, request
+from urllib import error, parse, request
 
 UNKNOWN_TOPIC = "unknown_topic"
 DEFAULT_TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "config" / "topic_taxonomy.json"
@@ -36,6 +37,73 @@ def _load_topic_api_template() -> Dict[str, Any]:
         return section
     except Exception:
         return {}
+
+
+def _extract_json_object_from_text(content: str) -> Dict[str, Any]:
+    """Best-effort JSON object extraction for chat-completion style responses."""
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("api returned empty text content")
+
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", text).strip()
+        text = re.sub(r"\n?```$", "", text).strip()
+
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        snippet = text[start : end + 1]
+        try:
+            data = json.loads(snippet)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    raise ValueError("api text content is not valid JSON object")
+
+
+def _resolve_api_style(url: str, module_style_key: str) -> str:
+    """Resolve api style: custom | openai_compatible."""
+    style = (
+        os.getenv(module_style_key, "").strip().lower()
+        or os.getenv("KNOWLEDGEHARNESS_API_STYLE", "").strip().lower()
+        or "auto"
+    )
+    if style in {"custom", "openai_compatible"}:
+        return style
+
+    parsed = parse.urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+    if "api.deepseek.com" in host or "api.openai.com" in host:
+        return "openai_compatible"
+    if path in {"", "/"}:
+        return "openai_compatible"
+    return "custom"
+
+
+def _resolve_openai_endpoint(url: str) -> str:
+    parsed = parse.urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/chat/completions"):
+        final_path = path
+    elif path.endswith("/v1"):
+        final_path = f"{path}/chat/completions"
+    elif path in {"", "/"}:
+        final_path = "/v1/chat/completions"
+    else:
+        final_path = f"{path}/chat/completions"
+    return parse.urlunparse(
+        (parsed.scheme, parsed.netloc, final_path, parsed.params, parsed.query, parsed.fragment)
+    )
 
 
 def _load_taxonomy(taxonomy_path: str | None = None) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -196,10 +264,46 @@ def _call_topic_api(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    style = _resolve_api_style(url, "TOPIC_CLASSIFIER_API_STYLE")
+    request_url = url
+    request_payload: Dict[str, Any]
+    if style == "openai_compatible":
+        request_url = _resolve_openai_endpoint(url)
+        model = (
+            os.getenv("TOPIC_CLASSIFIER_API_MODEL", "").strip()
+            or os.getenv("KNOWLEDGEHARNESS_API_MODEL", "").strip()
+            or "deepseek-chat"
+        )
+        request_payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": payload["system_prompt"]
+                    + " 只允许返回 JSON 对象，字段为 topic_label/confidence/reason。",
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "text": payload["text"],
+                            "allowed_labels": payload["allowed_labels"],
+                            "rules": payload["rules"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+    else:
+        request_payload = payload
+
     req = request.Request(
-        url=url,
+        url=request_url,
         method="POST",
-        data=json.dumps(payload).encode("utf-8"),
+        data=json.dumps(request_payload).encode("utf-8"),
         headers=headers,
     )
 
@@ -207,9 +311,18 @@ def _call_topic_api(
         body = resp.read().decode("utf-8", errors="replace")
 
     data = json.loads(body)
+    if style == "openai_compatible":
+        choices = data.get("choices", []) if isinstance(data, dict) else []
+        if not choices:
+            raise ValueError("openai-compatible api returned empty choices")
+        content = str(
+            ((choices[0] or {}).get("message") or {}).get("content") or ""
+        )
+        data = _extract_json_object_from_text(content)
+
     label = str(data.get("topic_label") or "").strip()
     confidence = data.get("confidence")
-    reason = str(data.get("reason") or "api assisted")
+    reason = str(data.get("reason") or f"api assisted ({style})")
 
     if label not in allowed:
         raise ValueError(f"api returned out-of-scope label: {label}")

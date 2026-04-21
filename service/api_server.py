@@ -35,6 +35,8 @@ class PipelineRequest(BaseModel):
     web_enrichment_mode: str = "auto"
     web_enrichment_timeout: float = 6.0
     web_enrichment_max_items: int = 8
+    web_enrichment_api_retries: int = 1
+    enable_api_assist: bool = False
     keypoint_min_confidence: float = 0.0
     keypoint_max_points: int = 12
     quiet: bool = True
@@ -92,13 +94,15 @@ def pipeline_run(req: PipelineRequest) -> Dict[str, Any]:
         web_enrichment_mode=req.web_enrichment_mode,
         web_enrichment_timeout=req.web_enrichment_timeout,
         web_enrichment_max_items=req.web_enrichment_max_items,
+        web_enrichment_api_retries=req.web_enrichment_api_retries,
+        api_assist_enabled=req.enable_api_assist,
         keypoint_min_confidence=req.keypoint_min_confidence,
         keypoint_max_points=req.keypoint_max_points,
     )
 
     return {
         "ok": True,
-        "api_notice": "请接入API后使用",
+        "api_notice": "API 协助默认关闭；如需启用请传 enable_api_assist=true",
         "result": result,
     }
 

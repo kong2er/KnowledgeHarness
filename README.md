@@ -60,6 +60,8 @@ python3 service/flask_server.py --port 8001
 --output-dir <path>              # 输出目录（相对路径以项目根为基准）
 --topic-mode auto|local|api      # 主题粗分类模式（默认 auto，API 失败自动降级）
 --enable-web-enrichment          # 启用可开关的 web enrichment
+--web-enrichment-api-retries <n> # Web API 可恢复错误重试次数
+--enable-api-assist              # 显式开启可选 API 协助（默认关闭）
 --export-docx                    # 额外导出 result.docx
 --full-report                    # 完整报告版（默认是纯笔记版）
 --quiet                          # 静默，不打印 [ingest] 进度
@@ -103,3 +105,12 @@ for t in tests/test_*.py; do python3 "$t"; done
 - 图片 OCR 保留 opt-in 语义，不拟改为"默认可用"（容器镜像视为开箱即用形态）
 - 高级（NLI / 向量）语义冲突检测、生产级鉴权/限流/队列不在 MVP 范围
 - 任何扩展需先登记到 `docs/TODO.md` 并按 `docs/ACCEPTANCE.md` 验收后再标记完成
+
+## API 协助开启方式（默认关闭）
+
+- 默认本地模式：即使已配置 API 地址，也不会自动调用外部 API。
+- 显式开启方式：
+  - CLI：`--enable-api-assist`
+  - UI：勾选“启用 API 协助（可选）”
+  - 服务接口：请求体 `enable_api_assist=true`
+- 开启后若 API 调用失败，仍按既有降级策略回退，不中断主流程。

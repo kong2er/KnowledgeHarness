@@ -63,6 +63,8 @@ _DEFAULTS: Dict[str, Any] = {
     "web_enrichment_mode": "auto",
     "web_enrichment_timeout": 6.0,
     "web_enrichment_max_items": 8,
+    "web_enrichment_api_retries": 1,
+    "enable_api_assist": False,
     "keypoint_min_confidence": 0.0,
     "keypoint_max_points": 12,
     "quiet": True,
@@ -98,8 +100,10 @@ def _parse_pipeline_request(payload: Any) -> Dict[str, Any]:
         out["keypoint_min_confidence"] = float(out["keypoint_min_confidence"])
         out["topic_api_retries"] = int(out["topic_api_retries"])
         out["web_enrichment_max_items"] = int(out["web_enrichment_max_items"])
+        out["web_enrichment_api_retries"] = int(out["web_enrichment_api_retries"])
         out["keypoint_max_points"] = int(out["keypoint_max_points"])
         out["enable_web_enrichment"] = bool(out["enable_web_enrichment"])
+        out["enable_api_assist"] = bool(out["enable_api_assist"])
         out["quiet"] = bool(out["quiet"])
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid numeric/boolean field: {exc}") from exc
@@ -161,6 +165,8 @@ def pipeline_run() -> Any:
             web_enrichment_mode=req["web_enrichment_mode"],
             web_enrichment_timeout=req["web_enrichment_timeout"],
             web_enrichment_max_items=req["web_enrichment_max_items"],
+            web_enrichment_api_retries=req["web_enrichment_api_retries"],
+            api_assist_enabled=req["enable_api_assist"],
             keypoint_min_confidence=req["keypoint_min_confidence"],
             keypoint_max_points=req["keypoint_max_points"],
         )
@@ -170,7 +176,7 @@ def pipeline_run() -> Any:
     return jsonify(
         {
             "ok": True,
-            "api_notice": "请接入API后使用",
+            "api_notice": "API 协助默认关闭；如需启用请传 enable_api_assist=true",
             "result": result,
         }
     )

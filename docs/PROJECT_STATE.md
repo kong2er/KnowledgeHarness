@@ -96,16 +96,20 @@ KnowledgeHarness/
   - 本地受约束标签集合来自 `config/topic_taxonomy.json`
   - 支持 `mode=auto/local/api`
   - 支持 API 重试（`api_retries`）
+  - 支持 API 协议风格：`custom` 与 `openai_compatible`（DeepSeek/OpenAI 兼容），`auto` 可自动识别并补全 `/v1/chat/completions`
   - API 输出必须落在 allowed labels 内；越界/失败/超时降级到 local/`unknown_topic`
   - 输出 `topic_classification.items/topic_groups/stats/warnings`
 
 - `tools/runtime_config.py`
   - 加载并深度合并运行时配置（`config/pipeline_config.json`）
   - 配置异常时回退默认值并产生 warning
+  - 新增 `api_assist.enabled_by_default`：控制是否默认开启 API 协助（当前默认 false）
 
 - `tools/web_enrichment.py`
   - 可开关 enrichment（`enabled + off/local/api/auto`）
   - local 模式从用户资料抽取 URL；api/auto 失败回退 local/off
+  - 支持 API 协议风格：`custom` 与 `openai_compatible`（DeepSeek/OpenAI 兼容），`auto` 可自动识别并补全 `/v1/chat/completions`
+  - 支持 API 重试（`api_retries`）
   - 输出资源 schema：`title/url/purpose/relevance_reason`
 
 - `tools/detect_semantic_conflicts.py`
@@ -150,6 +154,7 @@ KnowledgeHarness/
   - 在 `chunk_notes` 后、`classify_notes` 前新增 `topic_coarse_classify`
   - 新增 CLI 参数：`--topic-mode` / `--topic-taxonomy` / `--topic-api-timeout` / `--topic-api-retries`
   - 新增 web enrichment 参数：`--enable-web-enrichment` / `--web-enrichment-mode` / `--web-enrichment-timeout` / `--web-enrichment-max-items`
+  - 新增 web enrichment 重试参数：`--web-enrichment-api-retries`
   - 新增 keypoint 参数：`--keypoint-min-confidence`
   - 新增：`--keypoint-max-points`、`--config`
   - 运行时配置驱动：chunk 长度、分类字典、OCR 语言、导出折叠
@@ -159,6 +164,7 @@ KnowledgeHarness/
   - web enrichment warnings 与 semantic conflict 摘要进入 `pipeline_notes`
   - 当用户显式选择 API 模式但 URL 未配置时，打印提示：`请接入API后使用`
   - 支持统一 API 环境变量：`KNOWLEDGEHARNESS_API_URL / KNOWLEDGEHARNESS_API_KEY`
+  - API 协助策略：默认关闭，需显式开启（CLI `--enable-api-assist` / UI 勾选 / 服务请求字段 `enable_api_assist=true`）
   - 支持 `--export-docx`，可选导出 `result.docx`
   - 支持 `--full-report` 切换为完整报告版 md（默认纯笔记版）
   - CLI 结尾打印 `is_valid` 与 warnings 摘要

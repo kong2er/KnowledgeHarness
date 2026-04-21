@@ -28,7 +28,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "mode": "auto",
         "timeout_sec": 6.0,
         "max_items": 8,
+        "api_retries": 1,
     },
+    "api_assist": {"enabled_by_default": False},
     "ocr": {"languages": "chi_sim+eng", "fallback_language": "eng"},
     "export": {"markdown_use_details": False},
 }

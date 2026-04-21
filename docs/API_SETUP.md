@@ -29,6 +29,10 @@ cp .env.example .env
 ```dotenv
 KNOWLEDGEHARNESS_API_URL=https://your-shared-api.example.com/infer
 KNOWLEDGEHARNESS_API_KEY=your_token_if_needed
+# 可选：custom | openai_compatible | auto（默认 auto）
+KNOWLEDGEHARNESS_API_STYLE=auto
+# 可选：openai_compatible 默认模型
+KNOWLEDGEHARNESS_API_MODEL=deepseek-chat
 ```
 
 说明：
@@ -37,8 +41,20 @@ KNOWLEDGEHARNESS_API_KEY=your_token_if_needed
 - 当用户选择 `--topic-mode api` 或 `--web-enrichment-mode api` 但 URL 未配置时，CLI 会提示：`请接入API后使用`。
 - 如需按模块覆盖，可额外设置：
   - `TOPIC_CLASSIFIER_API_URL` / `TOPIC_CLASSIFIER_API_KEY`
+  - `TOPIC_CLASSIFIER_API_STYLE` / `TOPIC_CLASSIFIER_API_MODEL`
   - `WEB_ENRICHMENT_API_URL` / `WEB_ENRICHMENT_API_KEY`
+  - `WEB_ENRICHMENT_API_STYLE` / `WEB_ENRICHMENT_API_MODEL`
   - 覆盖变量留空时自动回退统一配置。
+
+### 2.1 OpenAI/DeepSeek 兼容模式（新增）
+
+- 当 `*_API_STYLE=auto` 且 URL 类似 `https://api.deepseek.com` / `https://api.openai.com`（或仅主域名）时，
+  系统会自动按 openai-compatible 协议调用。
+- endpoint 自动补全规则：
+  - `https://api.deepseek.com` -> `https://api.deepseek.com/v1/chat/completions`
+  - `https://api.deepseek.com/v1` -> `.../v1/chat/completions`
+  - 已填完整 `.../chat/completions` 则保持不变
+- 仍保留 `custom` 协议：如果你的服务是项目原生 JSON schema，可设 `*_API_STYLE=custom`。
 
 ## 3. 默认请求格式文件
 
@@ -130,14 +146,28 @@ KNOWLEDGEHARNESS_API_KEY=your_token_if_needed
 - Web Enrichment API 不可用/超时：降级到 local URL 提取或 off
 - 所有降级都会记录 warnings，并汇入 `pipeline_notes`
 
+## 6.1 API 协助触发策略（默认关闭，显式开启）
+
+- 默认行为：即使配置了 API URL/KEY，系统仍按本地模式运行（不自动调用外部 API）。
+- 显式开启方式：
+  - CLI：`--enable-api-assist`
+  - UI：勾选“启用 API 协助（可选）”
+  - FastAPI/Flask：请求体 `enable_api_assist=true`
+- 开启后会在 `topic_mode=auto` / `web_enrichment_mode=auto` 下允许 API 协助，
+  同时保留失败降级语义（不崩溃）。
+
 ## 7. 快速验证命令
 
 ```bash
-python3 app.py samples/demo.md --topic-mode api
-python3 app.py samples/demo.md --enable-web-enrichment --web-enrichment-mode api
+python3 app.py samples/demo.md --enable-api-assist --topic-mode api
+python3 app.py samples/demo.md --enable-api-assist --enable-web-enrichment --web-enrichment-mode api
 ```
 
 如果没配置 API URL，你会看到：`请接入API后使用`。
+
+可选增强参数：
+
+- `--web-enrichment-api-retries <n>`：Web API 可恢复错误重试次数（默认 1）
 
 ## 8. 启动最小服务入口（FastAPI）
 

@@ -156,6 +156,8 @@ def run_pipeline(
     web_enrichment_mode: str = "auto",
     web_enrichment_timeout: float = 6.0,
     web_enrichment_max_items: int = 8,
+    web_enrichment_api_retries: int = 1,
+    api_assist_enabled: bool = False,
     keypoint_min_confidence: float = 0.0,
     keypoint_max_points: int = 12,
     chunk_max_chars: int = 500,
@@ -183,10 +185,15 @@ def run_pipeline(
     ingestion_summary = parsed.get("ingestion_summary", {}) or {}
 
     chunks = chunk_notes(documents, max_chars=chunk_max_chars)
+    topic_mode_norm = (topic_mode or "auto").strip().lower()
+    topic_mode_effective = topic_mode_norm
+    if topic_mode_norm == "auto" and not api_assist_enabled:
+        topic_mode_effective = "local"
+
     topic_output = topic_coarse_classify(
         documents,
         taxonomy_path=topic_taxonomy_path,
-        mode=topic_mode,
+        mode=topic_mode_effective,
         api_timeout_sec=topic_api_timeout,
         api_retries=topic_api_retries,
     )
@@ -205,12 +212,33 @@ def run_pipeline(
         min_confidence=keypoint_min_confidence,
     )
 
+    has_any_api = bool(
+        os.getenv("WEB_ENRICHMENT_API_URL", "").strip()
+        or os.getenv("KNOWLEDGEHARNESS_API_URL", "").strip()
+    )
+    web_mode_norm = (web_enrichment_mode or "auto").strip().lower()
+    web_mode_effective = web_mode_norm
+    if web_mode_norm == "auto" and not api_assist_enabled:
+        web_mode_effective = "local"
+    web_enabled_effective = bool(web_enrichment_enabled)
+    auto_enabled_web = False
+    if (
+        not web_enabled_effective
+        and api_assist_enabled
+        and has_any_api
+        and web_mode_norm in {"auto", "api"}
+    ):
+        # User explicitly enabled API assist; auto-lift enrichment for tangible gain.
+        web_enabled_effective = True
+        auto_enabled_web = True
+
     enrichment_output = web_enrich(
         documents,
-        enabled=web_enrichment_enabled,
-        mode=web_enrichment_mode,
+        enabled=web_enabled_effective,
+        mode=web_mode_effective,
         timeout_sec=web_enrichment_timeout,
         max_items=web_enrichment_max_items,
+        api_retries=web_enrichment_api_retries,
     )
     web_resources: List[dict] = enrichment_output.get("resources", []) or []
     semantic_conflicts = detect_semantic_conflicts(
@@ -223,7 +251,7 @@ def run_pipeline(
         failed_sources=failed_sources,
         empty_sources=empty_sources,
         web_resources=web_resources,
-        web_enrichment_enabled=web_enrichment_enabled,
+        web_enrichment_enabled=web_enabled_effective,
         semantic_conflicts=semantic_conflicts,
     )
 
@@ -237,6 +265,14 @@ def run_pipeline(
     if input_files and not documents:
         pipeline_notes.append(
             "no usable input text: every detected file failed or was empty"
+        )
+    if has_any_api and not api_assist_enabled:
+        pipeline_notes.append(
+            "api assist disabled: using local-only strategy unless explicitly set to api mode"
+        )
+    if auto_enabled_web:
+        pipeline_notes.append(
+            "api assist enabled: auto-enabled web enrichment for this run"
         )
 
     if topic_output.get("warnings"):
@@ -356,6 +392,12 @@ def main() -> None:
         help="Maximum web resources to keep",
     )
     parser.add_argument(
+        "--web-enrichment-api-retries",
+        default=None,
+        type=int,
+        help="Retry count for web enrichment API on recoverable failures",
+    )
+    parser.add_argument(
         "--keypoint-max-points",
         default=None,
         type=int,
@@ -382,6 +424,11 @@ def main() -> None:
         action="store_true",
         help="Suppress per-file ingestion progress output",
     )
+    parser.add_argument(
+        "--enable-api-assist",
+        action="store_true",
+        help="Explicitly enable optional API-assisted stages (default: off/local-first)",
+    )
     args = parser.parse_args()
     runtime_conf, conf_warnings = load_runtime_config(args.config)
 
@@ -392,6 +439,7 @@ def main() -> None:
     notifier = None if args.quiet else _cli_ingest_notifier
     topic_conf = runtime_conf.get("topic", {}) or {}
     web_conf = runtime_conf.get("web_enrichment", {}) or {}
+    api_assist_conf = runtime_conf.get("api_assist", {}) or {}
     key_conf = runtime_conf.get("key_points", {}) or {}
     chunk_conf = runtime_conf.get("chunking", {}) or {}
     cls_conf = runtime_conf.get("classification", {}) or {}
@@ -400,6 +448,9 @@ def main() -> None:
     final_notes_default = bool(export_conf.get("final_notes_only", True))
     topic_mode_effective = args.topic_mode or topic_conf.get("mode", "auto")
     web_mode_effective = args.web_enrichment_mode or web_conf.get("mode", "auto")
+    api_assist_enabled = bool(args.enable_api_assist) or bool(
+        api_assist_conf.get("enabled_by_default", False)
+    )
 
     has_topic_api = bool(
         os.getenv("TOPIC_CLASSIFIER_API_URL", "").strip()
@@ -446,6 +497,12 @@ def main() -> None:
             if args.web_enrichment_max_items is not None
             else web_conf.get("max_items", 8)
         ),
+        web_enrichment_api_retries=int(
+            args.web_enrichment_api_retries
+            if args.web_enrichment_api_retries is not None
+            else web_conf.get("api_retries", 1)
+        ),
+        api_assist_enabled=api_assist_enabled,
         keypoint_min_confidence=float(
             args.keypoint_min_confidence
             if args.keypoint_min_confidence is not None
