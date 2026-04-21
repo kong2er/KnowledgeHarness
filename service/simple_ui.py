@@ -1711,7 +1711,7 @@ def main() -> None:
     parser.add_argument("--port", default=8765, type=int, help="监听端口")
     args = parser.parse_args()
 
-    server = ThreadingHTTPServer((args.host, args.port), _Handler)
+    server = create_server(args.host, args.port)
     print(f"简易界面已启动: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
@@ -1719,6 +1719,15 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+
+
+def create_server(host: str, port: int) -> ThreadingHTTPServer:
+    """Create the UI HTTP server.
+
+    Exposed for launcher/wrapper modules that want to run the same UI server
+    without invoking argparse in `main()`.
+    """
+    return ThreadingHTTPServer((host, port), _Handler)
 
 
 if __name__ == "__main__":

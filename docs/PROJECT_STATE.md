@@ -12,7 +12,11 @@ KnowledgeHarness/
 ├── .env.example
 ├── README.md
 ├── SKILL.md
+├── launch_app.py                   # one-click launcher (auto open browser)
+├── start_ui.sh
+├── start_ui.bat
 ├── requirements-api.txt             # FastAPI service deps (optional)
+├── requirements-desktop.txt         # desktop build deps (optional)
 ├── app.py
 ├── requirements.txt
 ├── requirements-ocr.txt             # opt-in OCR backend
@@ -46,6 +50,8 @@ KnowledgeHarness/
 ├── service/
 │   ├── api_server.py                # minimal FastAPI service entry
 │   └── simple_ui.py                 # local Web UI (stdlib; no 3rd-party framework)
+├── scripts/
+│   └── build_desktop.py             # pyinstaller packaging script
 ├── tests/
 │   ├── __init__.py
 │   ├── test_parse_inputs.py         # stdlib-only; runs via `python3 tests/...`
@@ -186,10 +192,18 @@ KnowledgeHarness/
   - **输出目录透明化**：相对路径一律以项目根目录（`ROOT`）为基准解析；UI 实时显示"本次将写入：<abs path>"；若不在 `outputs/` 之下则显示"下载链接不可用，需手动打开路径"警告
   - **下载端点 `GET /download?name=<basename>`**：严格限制在 `outputs/` 根目录，`name` 白名单正则 + `Path.resolve().relative_to()` 二层校验；任何路径穿越（`../` / 绝对路径 / 子目录）返回 400
   - **API 设置页 `/settings`**：密钥字段使用 `type=password` 且**从不回显当前值**；状态用"已配置（末 4 位：···abcd）"掩码形式呈现；留空提交 = 保持原值，不会误清空
+  - **双视图**：`/` 对外使用视图（默认，隐藏测试/调试信息）与 `/lab` 调试视图（显示测试参数与诊断信息）
   - **进度反馈**：submit 时 inline JS 禁用按钮 + 顶部显示"处理中"状态条
-  - **结果页**：摘要卡（校验 badge / ingestion 统计 / 分类计数 / 每源主题）+ 下载按钮（MD / JSON / DOCX）+ 可滚动的 markdown 预览
+  - **结果页**：对外视图仅展示最终笔记下载（MD / DOCX）与预览；调试视图额外展示摘要诊断与 JSON 下载
   - 错误分级：`ValueError` → 400（输入错误，如超限、不支持格式、空选）；其他异常 → 500（流水线异常），均保持 UI 存活
   - 自动加载项目根 `.env`（不覆盖已有系统环境变量）
+
+- `launch_app.py`
+  - 一键启动本地 UI 并自动打开浏览器（便于非技术用户直接使用）
+  - 端口占用时自动从起始端口向后探测可用端口
+
+- `scripts/build_desktop.py`
+  - 通过 PyInstaller 打包桌面可执行文件（`dist/`）
 
 - `tests/test_parse_inputs.py`
   - 仅覆盖"输入扩展与上传告知"模块的核心路径（不含 pytest 依赖，可直接 `python3` 运行）

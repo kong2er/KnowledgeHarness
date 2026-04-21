@@ -46,6 +46,10 @@ Input Files (txt/md/pdf/docx/png/jpg/jpeg)
   - 暴露 `/health`、`/pipeline/run`、`/pipeline/capabilities`
   - 服务层只做请求封装，不改动核心流水线语义
 
+- `launch_app.py`
+  - 桌面启动器：启动 `service/simple_ui.py` 同款 UI 服务并自动打开浏览器
+  - 用于“直接打开软件”式交付（配合 PyInstaller 打包）
+
 - `service/simple_ui.py`
   - 基于 stdlib `http.server` 的本地 Web UI，**零第三方依赖**（不使用已废弃的 `cgi` 模块）
   - 路由：`GET /`、`GET /settings`、`POST /run`、`POST /settings`、`POST /uploads/clear`、`POST /uploads/remove`、`GET /download?name=…`

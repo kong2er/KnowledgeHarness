@@ -155,7 +155,27 @@ python3 service/simple_ui.py --host 127.0.0.1 --port 8765
 # 浏览器打开 http://127.0.0.1:8765
 ```
 
+8.1 一键启动（面向非技术用户）：
+
+```bash
+python3 launch_app.py
+# 或 Linux/macOS
+./start_ui.sh
+# 或 Windows
+start_ui.bat
+```
+
+8.2 打包为可执行文件（软件化交付）：
+
+```bash
+pip install -r requirements-desktop.txt
+python3 scripts/build_desktop.py --name KnowledgeHarness
+# 产物在 dist/KnowledgeHarness(或 .exe)
+```
+
 UI 功能一览：
+- **双视图**：`/` 为对外使用视图（默认，仅保留生产流程）；`/lab` 为调试视图（测试参数与诊断信息）。
+- **默认隐藏调试入口**：对外视图不展示调试入口；如需在首页显示，可设置 `KH_UI_SHOW_LAB_LINK=1`。
 - **文件上传** + **文件池**：上传的文件保留在 `uploads/ui_uploads/`，页面会列出池内所有文件（含类型 pill / 大小 / 时间），下次运行直接勾选即可，不用重传。单次运行上限：**图片 10 张 / 总数 20 个 / 单文件 20 MB / 整个请求体 200 MB**（常量在 `service/simple_ui.py` 顶部可调）。
 - **输出目录可自设**：相对路径以项目根为基准；UI 实时显示"本次将写入"的绝对路径。当目标不在 `outputs/` 根目录时，下载链接自动退化为纯文本路径并给出警告。
 - **下载端点** `GET /download?name=result.md|result.json|result.docx`：严格限制在 `outputs/` 根目录，路径遍历被双层校验拦截。

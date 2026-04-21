@@ -42,6 +42,8 @@
 - [x] ~~清洗最终笔记 Markdown 排版（去前缀冠词与 heading_path 噪声、多源来源标注、自适应"重点速记"）~~（2026-04-20：`_render_final_notes_markdown` 与 `export_word` 的 Quote/italic/HR 支持）
 - [x] ~~UI 已上传文件池 + 上传安全限额（图片 10 / 总数 20 / 单文件 20MB / 请求体 200MB）~~（2026-04-20：`service/simple_ui.py` 常量 + `_store_uploaded_files` 校验）
 - [x] ~~UI 文件池类型/计数汇总 + 输出目录透明化（以项目根为基准解析，实时显示"本次将写入"的绝对路径）~~（2026-04-20）
+- [x] ~~UI 对外视图与调试视图分层（`/` 与 `/lab`），默认隐藏测试参数~~（2026-04-21）
+- [x] ~~新增一键启动与桌面打包链路（`launch_app.py` + `scripts/build_desktop.py`）~~（2026-04-21）
 
 ## P1+（安全 / 合规，本轮响应式补齐）
 

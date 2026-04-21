@@ -4,4 +4,7 @@ outputs/
 .venv/
 .DS_Store
 .env
+dist/
+build/
+*.spec
 uploads/
