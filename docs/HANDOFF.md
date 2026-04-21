@@ -1,14 +1,15 @@
 # HANDOFF
 
-Last Updated: 2026-04-20（当日多轮迭代的最终基线）
+Last Updated: 2026-04-21（基于 4/20 初版落地 + 4/21 交付面板收尾的最终基线）
 
 ## 当前可用交接结论
 
-- 仓库 `main` 与 `origin/main` 同步至 `2395953`，本地工作树 clean。
+- 仓库 `main` 与 `origin/main` 同步至 `7d2fd23`，本地工作树 clean。
 - MVP 主流程端到端可跑并产出 `result.json` / `result.md`（多源时含 `> 本笔记由 N 份文档合并整理` 引用头 + 每条 `*（来源：xxx）*` 斜体标注）。
 - 4 种交付面板（CLI / FastAPI / Web UI / Docker）共享同一个 `app.run_pipeline`，CLI 验收过的行为在其他面上同样成立。
+- 4/21 收尾做了 UI 对外/调试视图分离、专业视觉体系重构、流程感知 Header + 完整 API 设置覆盖、桌面一键启动与打包。功能无分叉，全部仍复用 `app.run_pipeline`。
 
-## 今日交付的 9 个 commit（从老到新）
+## 4/20 落地的 9 个 commit（从老到新）
 
 ```
 211fd5a  feat: scaffold KnowledgeHarness MVP pipeline
@@ -22,6 +23,15 @@ bf0dd4f  feat: input expansion + user ingestion notice module
 2395953  feat(ui): pool type/count breakdown + output-dir transparency
 ```
 
+## 4/21 追加的 4 个 commit（从老到新）
+
+```
+af81467  docs: sync governance docs with today's delivery baseline
+5127194  feat(ui): professional redesign (prod/lab split, tokens, typography)
+b58fa67  feat(ui): flow-aware header + full API settings coverage
+7d2fd23  feat(ui): split prod/lab views and add desktop launch packaging
+```
+
 ## 已交付能力（按交付顺序而不是类别排列）
 
 1. **输入扩展 & ingestion notice**（bf0dd4f）：txt/md/pdf/docx 默认可用，图片 opt-in OCR + 显式降级；`failed_sources` 带 `reason`；`ingestion_summary` 自报。
@@ -30,13 +40,17 @@ bf0dd4f  feat: input expansion + user ingestion notice module
 4. **最终笔记排版清洗**（3f9a744）：`_render_final_notes_markdown` 去冠词前缀与 heading_path 尾巴；多源自动加引用头与来源标注；"重点速记"自适应（≤12 条时省略）；`export_word` 支持斜体、Quote、水平线。
 5. **UI 文件池 + 上传安全限额**（1993ba6）：`uploads/ui_uploads/` 显式成"池"，勾选即可再次运行；新增 `/uploads/clear`、`/uploads/remove`；图片/总数/单文件/请求体四重限额；顺手修了 `collect_input_files` 对 EXCLUDED 路径下显式文件的老 bug。
 6. **UI 类型汇总 + 输出目录透明化**（2395953）：池顶部总数胶囊 + 类型分布（按计数降序）；每行带类型 pill（图片琥珀色区分）；输出目录以 `ROOT` 为基准解析，UI 实时显示"本次将写入"的绝对路径与下载链接可用性警告。
+7. **治理文档同步基线**（af81467）：把 README / PROJECT_STATE / ACCEPTANCE / ARCHITECTURE / HANDOFF / TODO 六份文档同步到 4/20 代码交付的真实状态，新增 export_notes / export_word / simple_ui 的模块级验收条目。
+8. **UI 对外/调试视图分离 + 桌面交付链**（7d2fd23）：`/` 为对外生产视图（默认），`/lab` 为调试视图（不主动暴露入口，需 `KH_UI_SHOW_LAB_LINK=1`）；新增 `launch_app.py` 一键启动（端口占用时自动探测）与 `scripts/build_desktop.py` PyInstaller 桌面打包链路。
+9. **专业视觉体系重构**（5127194）：统一 CSS token 配色（`--bg/--surface/--text/--accent`），系统字体栈含 CJK fallback，一致圆角（10/6/999），响应式断点（720px），输入框 focus-ring；`<header>` 与上传卡片分层，copy 去"简易界面"自嘲文案；功能零改动，70/70 测试仍绿。
+10. **流程感知 Header + 完整 API 设置覆盖**（b58fa67）：主页标题旁 `API 状态` chip（本地模式 / API 已配置；只显 on/off，**永不回显 URL/Key 值**）；`/settings` 分"主设置"与"按模块覆盖"两栏（topic/enrichment 各 URL/KEY/TEMPLATE，默认折叠），每字段配"清空此字段" checkbox，`_write_env_pairs(clears=...)` 把 `.env` 对应行改写为 `KEY=` 形式保留结构，同步重置 `os.environ` 让变更立即生效。
 
-## 硬验收线（已实测）
+## 硬验收线（已实测，2026-04-21 重跑）
 
 - `python3 app.py samples/demo.md --output-dir outputs --quiet` → `is_valid=True` / warnings=(none)
 - `python3 app.py samples/demo.md samples/ingest_demo.docx --output-dir /tmp/kh_final_check --quiet` → `is_valid=True`，主题分到 `machine_learning` + `reinforcement_learning`
-- 6 份 stdlib 测试脚本：`70 passed + 1 SKIP`（`test_api_service_entry.py` 在 fastapi 未装时 SKIP，是设计行为）
-- UI 端到端（curl）：池卡片展示、勾选池重跑、/download 白名单、11 张图片超限拒收、21 MB 大文件拒收、/uploads/clear HTTP 303 全部通过
+- 6 份 stdlib 测试脚本：`29+16+9+11+5+1(SKIP) = 70 passed + 1 SKIP`（`test_api_service_entry.py` 在 fastapi 未装时 SKIP，是设计行为；本机 tesseract 已装时 parse_inputs 的 degrade-path 1 条 SKIP）
+- UI 端到端（curl）：`/` 200、`/lab` 200、`/settings` 200（密钥字段 `type=password` + `autocomplete=new-password` + `value=""`，零泄漏）、`/download?name=result.md` 200、`/download?name=../config.json` 400、`/download?name=/etc/passwd` 400；所有路径遍历防御生效
 - 运行时 `result.json` 顶层 11 个必需键齐全：`overview / source_documents / topic_classification / categorized_notes / stage_summaries / key_points / web_resources / semantic_conflicts / review_needed / pipeline_notes / validation`
 
 ## 剩余未完成（TODO 明面上只剩 2 条）

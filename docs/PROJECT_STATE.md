@@ -1,6 +1,6 @@
 # PROJECT_STATE
 
-Last Updated: 2026-04-20
+Last Updated: 2026-04-21
 
 ## 1) Current Project Structure
 
@@ -193,6 +193,9 @@ KnowledgeHarness/
   - **下载端点 `GET /download?name=<basename>`**：严格限制在 `outputs/` 根目录，`name` 白名单正则 + `Path.resolve().relative_to()` 二层校验；任何路径穿越（`../` / 绝对路径 / 子目录）返回 400
   - **API 设置页 `/settings`**：密钥字段使用 `type=password` 且**从不回显当前值**；状态用"已配置（末 4 位：···abcd）"掩码形式呈现；留空提交 = 保持原值，不会误清空
   - **双视图**：`/` 对外使用视图（默认，隐藏测试/调试信息）与 `/lab` 调试视图（显示测试参数与诊断信息）
+  - **流程感知 Header（2026-04-21）**：主页标题旁展示 `API 状态` chip，读取 `KNOWLEDGEHARNESS_API_URL` / `TOPIC_CLASSIFIER_API_URL` / `WEB_ENRICHMENT_API_URL` 任一存在即显示"API 已配置"，否则显示"本地模式"；只显示 on/off 状态，**绝不回显任何 URL/Key 值**；点击跳转 `/settings`
+  - **完整 API 设置覆盖（2026-04-21）**：`/settings` 现分为"主设置"（`KNOWLEDGEHARNESS_API_URL/KEY`，默认展开）与"按模块覆盖"（`TOPIC_CLASSIFIER_API_URL/KEY/TEMPLATE` + `WEB_ENRICHMENT_API_URL/KEY/TEMPLATE`，默认折叠）；每个字段新增"清空此字段" checkbox，配合 `_write_env_pairs(clears=...)` 把 `.env` 对应行改写为 `KEY=` 形式（保留文件结构）并同步重置当前进程 `os.environ`
+  - **专业重设计（2026-04-21，纯视觉）**：统一 CSS token 配色（`--bg/--surface/--text/--accent` 等）、系统字体栈（CJK fallback）、一致圆角（10/6/999）、响应式断点（`max-width: 720px`）；功能未变
   - **进度反馈**：submit 时 inline JS 禁用按钮 + 顶部显示"处理中"状态条
   - **结果页**：对外视图仅展示最终笔记下载（MD / DOCX）与预览；调试视图额外展示摘要诊断与 JSON 下载
   - 错误分级：`ValueError` → 400（输入错误，如超限、不支持格式、空选）；其他异常 → 500（流水线异常），均保持 UI 存活
