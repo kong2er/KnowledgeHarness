@@ -84,8 +84,8 @@ python3 service/flask_server.py --port 8001
 
 - 产物路径：`dist/KnowledgeHarness.exe`
 - 元信息：`dist/KnowledgeHarness.exe.buildinfo.json`
-- 当前封包时间：`2026-04-22 20:28:00 +08:00`
-- 当前封包 SHA256：`4def8abc783b8185f96be86405e8ff107a2583c7a63ebf6aeb5a9a380d4695d0`
+- 当前封包时间：`2026-04-22 20:36:08 +08:00`
+- 当前封包 SHA256：`15c035f4efadb7c361c5ca0cf27e8445f7eace6a4b0c21511232fd02ad5710a9`
 
 复核命令：
 

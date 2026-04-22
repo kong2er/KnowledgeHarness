@@ -61,7 +61,7 @@ Last Updated: 2026-04-22（含 UI 双栏信息架构重构与 Agent UI 合约文
 | UI 路由 smoke | `/` `/lab` `/settings` `/outputs` 200；`/download` 白名单 200/400/400 |
 | UI 密钥泄漏审计 | `type=password` + `autocomplete=new-password` + `value=""`，零泄漏 |
 | `result.json` 顶层键 | 11 个必需键齐全 |
-| `dist/KnowledgeHarness.exe` | 已更新并入库；SHA256=`4def8abc783b8185f96be86405e8ff107a2583c7a63ebf6aeb5a9a380d4695d0` |
+| `dist/KnowledgeHarness.exe` | 已更新并入库；SHA256=`15c035f4efadb7c361c5ca0cf27e8445f7eace6a4b0c21511232fd02ad5710a9` |
 
 ## 依赖栈
 
