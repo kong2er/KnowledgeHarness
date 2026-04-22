@@ -80,6 +80,21 @@ python3 service/flask_server.py --port 8001
 | 桌面可执行文件 | `pip install -r requirements-desktop.txt && python3 scripts/build_desktop.py`（按当前系统产物：Linux/macOS 生成无后缀可执行文件，Windows 生成 `.exe`） |
 | Docker（OCR-ready） | `docker build -t knowledgeharness . && docker run --rm -v "$PWD/samples:/data" knowledgeharness python app.py /data/demo.md --output-dir /data/out` |
 
+### Windows `.exe` 封包校验（当前基线）
+
+- 产物路径：`dist/KnowledgeHarness.exe`
+- 元信息：`dist/KnowledgeHarness.exe.buildinfo.json`
+- 当前封包时间：`2026-04-22 20:28:00 +08:00`
+- 当前封包 SHA256：`4def8abc783b8185f96be86405e8ff107a2583c7a63ebf6aeb5a9a380d4695d0`
+
+复核命令：
+
+```bash
+stat -c '%y %s' dist/KnowledgeHarness.exe
+sha256sum dist/KnowledgeHarness.exe
+cat dist/KnowledgeHarness.exe.buildinfo.json
+```
+
 ## 治理文档索引
 
 | 文件 | 作用 |

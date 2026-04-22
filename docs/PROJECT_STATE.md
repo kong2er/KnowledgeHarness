@@ -335,3 +335,10 @@ KnowledgeHarness/
 1. 真实 API 联调验收闭环（外部依赖到位后执行）。
 2. 词库/taxonomy 基于真实语料的持续调优流程。
 3. `outputs/` 子目录下载体验（不放松安全边界前提）。
+
+封包状态（Windows）：
+
+- 当前仓库已包含最新提交的 `.exe` 封包：`dist/KnowledgeHarness.exe`
+- 对应元信息：`dist/KnowledgeHarness.exe.buildinfo.json`
+- 封包时间：`2026-04-22 20:28:00 +08:00`
+- 封包 SHA256：`4def8abc783b8185f96be86405e8ff107a2583c7a63ebf6aeb5a9a380d4695d0`

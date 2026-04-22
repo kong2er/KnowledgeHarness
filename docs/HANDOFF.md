@@ -44,6 +44,7 @@ Last Updated: 2026-04-22（含 UI 双栏信息架构重构与 Agent UI 合约文
   - `docs/AGENT_A_UI_CONTRACT.md`
   - `docs/AGENT_B_UI_INFORMATION_ARCHITECTURE.md`
   - `docs/AGENT_C_UI_USABILITY_ACCEPTANCE.md`
+- Windows 封包追踪已固化：`dist/KnowledgeHarness.exe` 与 `dist/KnowledgeHarness.exe.buildinfo.json` 同步维护，可通过 `sha256sum` 快速校验
 
 ## Commit Trace
 
@@ -60,6 +61,7 @@ Last Updated: 2026-04-22（含 UI 双栏信息架构重构与 Agent UI 合约文
 | UI 路由 smoke | `/` `/lab` `/settings` `/outputs` 200；`/download` 白名单 200/400/400 |
 | UI 密钥泄漏审计 | `type=password` + `autocomplete=new-password` + `value=""`，零泄漏 |
 | `result.json` 顶层键 | 11 个必需键齐全 |
+| `dist/KnowledgeHarness.exe` | 已更新并入库；SHA256=`4def8abc783b8185f96be86405e8ff107a2583c7a63ebf6aeb5a9a380d4695d0` |
 
 ## 依赖栈
 
