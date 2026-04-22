@@ -86,6 +86,7 @@ MAX_IMAGE_COUNT_PER_RUN = 10          # png/jpg/jpeg combined
 MAX_TOTAL_FILES_PER_RUN = 20          # overall cap across all extensions
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024   # 20 MB per single uploaded file
 MAX_REQUEST_BODY_BYTES = 200 * 1024 * 1024  # 200 MB per whole POST body
+MAX_OUTPUT_BROWSER_ROWS = 300
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 
@@ -834,11 +835,11 @@ def _render_page(
         pool_rows_html.append(
             "<li class=\"pool-row\">"
             "<label class=\"pool-pick\">"
-            f'<input type=\"checkbox\" name=\"existing_files\" value=\"{escaped}\" {checked} form=\"runForm\" />'
+            f'<input type=\"checkbox\" name=\"existing_files\" value=\"{escaped}\" {checked} form=\"runForm\" data-ext=\"{html.escape(ext)}\" />'
             f'<span class=\"{pill_class}\">{html.escape(ext)}</span>'
             f'<span class=\"pool-name\">{escaped}</span>'
             f'<span class=\"pool-meta\">{_format_size(size)} · {date_str}</span>'
-            f'<span class=\"{pick_status_class}\">{pick_status}</span>'
+            f'<span class=\"{pick_status_class}\" data-file-status>{pick_status}</span>'
             "</label>"
             '<form method=\"post\" action=\"/uploads/remove\" class=\"pool-remove\">'
             f'<input type=\"hidden\" name=\"name\" value=\"{escaped}\" />'
@@ -866,6 +867,11 @@ def _render_page(
             f"当前池中文件总数 {len(pool_items)} 超过单次处理上限 {MAX_TOTAL_FILES_PER_RUN} 个，请先清理或少量勾选。"
         )
     pool_warn_html = "".join(f'<p class="pool-warn">{html.escape(msg)}</p>' for msg in pool_warns)
+    selected_pool_count = sum(1 for name, _size, _mtime in pool_items if name in pool_selected)
+    run_target_hint = (
+        f"本次将处理 {selected_pool_count} 个"
+        f"（文件池已勾选 {selected_pool_count} + 待上传 0）"
+    )
 
     if pool_items:
         pool_list_html = f"""
@@ -879,6 +885,13 @@ def _render_page(
           </div>
           <p class="hint">{html.escape(breakdown_line)}</p>
           <p class="hint">{html.escape(upload_info)}</p>
+          <div id="poolQuickActions" class="quick-actions">
+            <button type="button" class="tertiary" data-pool-bulk="all">全选</button>
+            <button type="button" class="tertiary" data-pool-bulk="none">全不选</button>
+            <button type="button" class="tertiary" data-pool-bulk="image">仅图片</button>
+            <button type="button" class="tertiary" data-pool-bulk="docs">仅文档</button>
+            <button type="button" class="tertiary" data-pool-bulk="invert">反选</button>
+          </div>
           {pool_warn_html}
           <ul class="pool-list">{''.join(pool_rows_html)}</ul>
         </section>
@@ -1006,7 +1019,7 @@ def _render_page(
     md_download_chip = _render_download_button("下载 Markdown", "md", md_path)
     docx_download_chip = _render_download_button("下载 Word", "docx", docx_path)
     open_result_btn = (
-        f'<a class="secondary-link" href="/download?name={html.escape(_relative_to_outputs(md_path))}" download>打开结果文件</a>'
+        f'<a class="secondary-link result-main-btn" href="/download?name={html.escape(_relative_to_outputs(md_path))}" download>打开结果文件</a>'
         if _relative_to_outputs(md_path)
         else '<span class="disabled-action">打开结果文件（未生成）</span>'
     )
@@ -1022,11 +1035,24 @@ def _render_page(
             <li>校验状态：<strong>{'通过' if validation.get('is_valid') else '有告警'}</strong>（warnings: {len(warnings)}）</li>
             <li>导出状态：<strong>{'已生成' if md_path else '未生成'}</strong></li>
           </ul>
-          <div class="result-actions">
-            {open_result_btn}
-            <a class="secondary-link" href="{html.escape(output_browser_link)}">打开输出目录</a>
+          <div class="result-action-groups">
+            <div class="action-block">
+              <p class="action-label">主动作</p>
+              <div class="result-actions action-primary-row">
+                {open_result_btn}
+              </div>
+            </div>
+            <div class="action-block">
+              <p class="action-label">次级动作</p>
+              <div class="result-actions">
+                <a class="secondary-link" href="{html.escape(output_browser_link)}">打开输出目录</a>
+              </div>
+            </div>
+            <div class="action-block">
+              <p class="action-label">下载（可选）</p>
+              <div class="download-row">{md_download_chip}{docx_download_chip}</div>
+            </div>
           </div>
-          <div class="download-row">{md_download_chip}{docx_download_chip}</div>
         </section>
         <section class="card right-card">
           <h2>主题粗分类摘要</h2>
@@ -1061,9 +1087,19 @@ def _render_page(
         <section class="card right-card">
           <h2>结果摘要</h2>
           <p class="empty">尚未开始运行。完成后会在这里显示结果摘要与导出入口。</p>
-          <div class="result-actions">
-            <span class="disabled-action">打开结果文件（未生成）</span>
-            <a class="secondary-link" href="{html.escape(output_browser_link)}">打开输出目录</a>
+          <div class="result-action-groups">
+            <div class="action-block">
+              <p class="action-label">主动作</p>
+              <div class="result-actions action-primary-row">
+                <span class="disabled-action">打开结果文件（未生成）</span>
+              </div>
+            </div>
+            <div class="action-block">
+              <p class="action-label">次级动作</p>
+              <div class="result-actions">
+                <a class="secondary-link" href="{html.escape(output_browser_link)}">打开输出目录</a>
+              </div>
+            </div>
           </div>
         </section>
         """
@@ -1210,6 +1246,9 @@ def _render_page(
     .type-pill {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; border: 1px solid var(--border); border-radius: 4px; background: #f8fafc; color: var(--text-muted); padding: 1px 6px; }}
     .type-pill.type-img {{ background: #fffbeb; border-color: #fde68a; color: var(--warn); }}
     .pool-warn {{ margin: 8px 0 0; color: var(--warn); font-size: 12px; }}
+    .quick-actions {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }}
+    .quick-actions .tertiary {{ padding: 6px 10px; }}
+    .run-target-hint {{ margin-top: 4px; font-weight: 560; color: #1f2937; }}
 
     .stage-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }}
     .stage-title {{ font-size: 18px; font-weight: 620; margin: 0; }}
@@ -1236,8 +1275,12 @@ def _render_page(
     .kv-list li {{ padding: 4px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px; }}
     .kv-list li:last-child {{ border-bottom: 0; }}
 
-    .result-actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }}
+    .result-action-groups {{ display: grid; gap: 8px; margin-bottom: 10px; }}
+    .action-block {{ border: 1px dashed #d1d5db; border-radius: var(--radius-sm); background: #fafafa; padding: 8px; }}
+    .action-label {{ margin: 0 0 6px; color: var(--text-muted); font-size: 12px; font-weight: 600; }}
+    .result-actions {{ display: flex; flex-wrap: wrap; gap: 8px; }}
     .download-row {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .result-main-btn {{ border-color: #9ca3af; font-weight: 620; }}
     .download-btn {{ display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; text-decoration: none; color: var(--text); background: #fff; }}
     .download-btn:hover {{ background: var(--surface-soft); }}
     .download-btn .ext {{ font-size: 11px; color: var(--text-muted); background: #f3f4f6; border-radius: 4px; padding: 1px 5px; }}
@@ -1282,26 +1325,106 @@ def _render_page(
       var pickFile = document.getElementById("upload_files");
       var pickFolder = document.getElementById("upload_folder");
       var pickedHint = document.getElementById("pickedHint");
+      var runTargetHint = document.getElementById("runTargetHint");
       var resetPickedBtn = document.getElementById("resetPickedBtn");
+      var poolQuickActions = document.getElementById("poolQuickActions");
 
-      function updatePickedHint() {{
+      function allPoolChecks() {{
+        return Array.prototype.slice.call(
+          document.querySelectorAll('input[name="existing_files"][form="runForm"]')
+        );
+      }}
+
+      function countPendingUploads() {{
         var total = 0;
         if (pickFile && pickFile.files) total += pickFile.files.length;
         if (pickFolder && pickFolder.files) total += pickFolder.files.length;
+        return total;
+      }}
+
+      function countSelectedPool() {{
+        return allPoolChecks().filter(function (el) {{ return !!el.checked; }}).length;
+      }}
+
+      function updatePickedHint() {{
+        var total = countPendingUploads();
         if (!pickedHint) return;
         pickedHint.textContent = total > 0 ? ("已选择 " + total + " 个待上传文件") : "尚未选择本次新上传文件";
       }}
 
-      if (pickFile) pickFile.addEventListener("change", updatePickedHint);
-      if (pickFolder) pickFolder.addEventListener("change", updatePickedHint);
+      function updatePoolStatus() {{
+        allPoolChecks().forEach(function (box) {{
+          var row = box.closest ? box.closest(".pool-row") : null;
+          if (!row) return;
+          var status = row.querySelector("[data-file-status]");
+          if (!status) return;
+          if (box.checked) {{
+            status.textContent = "本次将处理";
+            status.classList.add("selected");
+          }} else {{
+            status.textContent = "待选择";
+            status.classList.remove("selected");
+          }}
+        }});
+      }}
+
+      function updateRunTargetHint() {{
+        if (!runTargetHint) return;
+        var selected = countSelectedPool();
+        var pending = countPendingUploads();
+        var total = selected + pending;
+        runTargetHint.textContent =
+          "本次将处理 " + total + " 个（文件池已勾选 " + selected + " + 待上传 " + pending + "）";
+      }}
+
+      function refreshSelectionHints() {{
+        updatePickedHint();
+        updatePoolStatus();
+        updateRunTargetHint();
+      }}
+
+      if (pickFile) pickFile.addEventListener("change", refreshSelectionHints);
+      if (pickFolder) pickFolder.addEventListener("change", refreshSelectionHints);
       if (resetPickedBtn) {{
         resetPickedBtn.addEventListener("click", function () {{
           if (pickFile) pickFile.value = "";
           if (pickFolder) pickFolder.value = "";
-          updatePickedHint();
+          refreshSelectionHints();
         }});
       }}
-      updatePickedHint();
+
+      allPoolChecks().forEach(function (box) {{
+        box.addEventListener("change", refreshSelectionHints);
+      }});
+
+      if (poolQuickActions) {{
+        poolQuickActions.addEventListener("click", function (event) {{
+          var target = event.target;
+          if (!target || !target.getAttribute) return;
+          var mode = target.getAttribute("data-pool-bulk");
+          if (!mode) return;
+          event.preventDefault();
+          allPoolChecks().forEach(function (box) {{
+            var ext = (box.getAttribute("data-ext") || "").toLowerCase();
+            var isImage = ext === "png" || ext === "jpg" || ext === "jpeg";
+            var isSupportedDoc = ext === "txt" || ext === "md" || ext === "pdf" || ext === "docx";
+            if (mode === "all") {{
+              box.checked = true;
+            }} else if (mode === "none") {{
+              box.checked = false;
+            }} else if (mode === "image") {{
+              box.checked = isImage;
+            }} else if (mode === "docs") {{
+              box.checked = isSupportedDoc;
+            }} else if (mode === "invert") {{
+              box.checked = !box.checked;
+            }}
+          }});
+          refreshSelectionHints();
+        }});
+      }}
+
+      refreshSelectionHints();
 
       if (!form) return;
       form.addEventListener("submit", function () {{
@@ -1358,6 +1481,7 @@ def _render_page(
             <input id="upload_files" class="hidden-file" type="file" name="upload_files" multiple />
             <input id="upload_folder" class="hidden-file" type="file" name="upload_files" webkitdirectory directory multiple />
             <p id="pickedHint" class="hint">尚未选择本次新上传文件</p>
+            <p id="runTargetHint" class="hint run-target-hint">{html.escape(run_target_hint)}</p>
             <p class="hint">单次上限：文件 ≤ {MAX_TOTAL_FILES_PER_RUN} 个；图片 ≤ {MAX_IMAGE_COUNT_PER_RUN} 张；单文件 ≤ {_format_size(MAX_FILE_SIZE_BYTES)}。</p>
           </section>
 
@@ -1425,30 +1549,67 @@ def _render_page(
 </html>"""
 
 
-def _render_output_browser_page(raw_dir: str, *, lab_mode: bool = False) -> str:
+def _render_output_browser_page(
+    raw_dir: str,
+    *,
+    lab_mode: bool = False,
+    query: str = "",
+    kind: str = "all",
+) -> str:
     resolved = _resolve_output_dir(raw_dir or "outputs")
     back_href = "/lab" if lab_mode else "/"
+    filter_action = "/lab/outputs" if lab_mode else "/outputs"
+
+    keyword = (query or "").strip()[:80]
+    keyword_lower = keyword.lower()
+    kind = (kind or "all").strip().lower()
+    if kind not in {"all", "file", "dir"}:
+        kind = "all"
 
     rows: List[str] = []
     warning = ""
+    truncation_tip = ""
+    stats_line = ""
+    filtered_total = 0
+
     if not resolved.exists():
         warning = f"输出目录不存在：{resolved}"
     elif not resolved.is_dir():
         warning = f"输出路径不是目录：{resolved}"
     else:
+        total_files = 0
+        total_dirs = 0
         entries = sorted(
             list(resolved.iterdir()),
             key=lambda p: (0 if p.is_file() else 1, -p.stat().st_mtime, p.name.lower()),
         )
-        for p in entries[:300]:
+        for p in entries:
+            is_dir = p.is_dir()
+            if is_dir:
+                total_dirs += 1
+            else:
+                total_files += 1
+
+            if kind == "file" and is_dir:
+                continue
+            if kind == "dir" and not is_dir:
+                continue
+            if keyword_lower and keyword_lower not in p.name.lower():
+                continue
+
+            filtered_total += 1
+            if len(rows) >= MAX_OUTPUT_BROWSER_ROWS:
+                continue
+
             try:
                 stat = p.stat()
                 mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
-                size_text = "-" if p.is_dir() else _format_size(int(stat.st_size))
+                size_text = "-" if is_dir else _format_size(int(stat.st_size))
             except OSError:
                 mtime = "-"
                 size_text = "-"
-            if p.is_dir():
+
+            if is_dir:
                 rows.append(
                     "<tr>"
                     f"<td>{html.escape(p.name)}</td>"
@@ -1484,15 +1645,27 @@ def _render_output_browser_page(raw_dir: str, *, lab_mode: bool = False) -> str:
                 "</tr>"
             )
 
+        stats_line = (
+            "统计：目录 "
+            f"<strong>{total_dirs}</strong> 个 · 文件 <strong>{total_files}</strong> 个 · "
+            f"筛选后 <strong>{filtered_total}</strong> 条 · 当前展示 <strong>{len(rows)}</strong> 条"
+        )
+        if filtered_total > MAX_OUTPUT_BROWSER_ROWS:
+            truncation_tip = (
+                "筛选结果较多：共 "
+                f"{filtered_total} 条，仅显示前 {MAX_OUTPUT_BROWSER_ROWS} 条。"
+                "请继续使用关键字或类型过滤。"
+            )
+
+    empty_text = "（无匹配项）" if (keyword or kind != "all") else "（无文件）"
     table_html = (
         "<table><thead><tr><th>名称</th><th>类型</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>"
-        f"<tbody>{''.join(rows) if rows else '<tr><td colspan=5>（无文件）</td></tr>'}</tbody></table>"
+        f"<tbody>{''.join(rows) if rows else f'<tr><td colspan=5>{empty_text}</td></tr>'}</tbody></table>"
     )
-    warning_html = (
-        f'<p class="warn">{html.escape(warning)}</p>'
-        if warning
-        else ""
-    )
+    warning_html = f'<p class="warn">{html.escape(warning)}</p>' if warning else ""
+    truncation_html = f'<p class="warn">{html.escape(truncation_tip)}</p>' if truncation_tip else ""
+    stats_html = f'<p class="hint">{stats_line}</p>' if stats_line else ""
+    clear_filter_href = f"{filter_action}?dir={quote(str(resolved))}"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1529,9 +1702,22 @@ def _render_output_browser_page(raw_dir: str, *, lab_mode: bool = False) -> str:
       font-size: 13px;
     }}
     .btn:hover {{ background: #f3f4f6; }}
+    .filters {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-bottom: 10px; }}
+    .field {{ min-width: 180px; }}
+    .field label {{ display: block; margin: 0 0 4px; color: #6b7280; font-size: 12px; }}
+    .field input, .field select {{
+      width: 100%;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 7px 10px;
+      font: inherit;
+    }}
     table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
     th, td {{ border-bottom: 1px solid #eef2f7; padding: 8px; text-align: left; }}
     th {{ color: #6b7280; font-weight: 600; }}
+    @media (max-width: 760px) {{
+      .field {{ width: 100%; min-width: 0; }}
+    }}
   </style>
 </head>
 <body>
@@ -1541,9 +1727,28 @@ def _render_output_browser_page(raw_dir: str, *, lab_mode: bool = False) -> str:
       <p class="hint">当前目录：<code>{html.escape(str(resolved))}</code></p>
       <p class="hint">说明：浏览器“下载”仅支持 <code>outputs/</code> 根目录下的文件。</p>
       {warning_html}
+      {truncation_html}
+      {stats_html}
       <div class="actions">
         <a class="btn" href="{back_href}">返回主界面</a>
       </div>
+      <form method="get" action="{filter_action}" class="filters">
+        <input type="hidden" name="dir" value="{html.escape(str(resolved))}" />
+        <div class="field">
+          <label for="q">名称过滤</label>
+          <input id="q" name="q" type="text" value="{html.escape(keyword)}" placeholder="输入关键字过滤" />
+        </div>
+        <div class="field">
+          <label for="kind">类型过滤</label>
+          <select id="kind" name="kind">
+            <option value="all" {_selected(kind, "all")}>全部</option>
+            <option value="file" {_selected(kind, "file")}>仅文件</option>
+            <option value="dir" {_selected(kind, "dir")}>仅目录</option>
+          </select>
+        </div>
+        <button type="submit" class="btn">应用过滤</button>
+        <a class="btn" href="{clear_filter_href}">清除过滤</a>
+      </form>
       {table_html}
     </div>
   </div>
@@ -2060,20 +2265,20 @@ class _Handler(BaseHTTPRequestHandler):
         params = parse_qs(query, keep_blank_values=False)
         name = (params.get("name") or [""])[0].strip()
         if not name or "/" in name or "\\" in name or name.startswith("."):
-            self._write_html("<h1>invalid file name</h1>", status=400)
+            self._write_html("<h1>文件名不合法</h1>", status=400)
             return
         if not re.match(r"^[\w.\-]+$", name):
-            self._write_html("<h1>invalid file name</h1>", status=400)
+            self._write_html("<h1>文件名不合法</h1>", status=400)
             return
 
         try:
             target = (OUTPUT_WHITELIST_ROOT / name).resolve()
             target.relative_to(OUTPUT_WHITELIST_ROOT)
         except ValueError:
-            self._write_html("<h1>path traversal blocked</h1>", status=400)
+            self._write_html("<h1>非法路径请求</h1>", status=400)
             return
         if not target.exists() or not target.is_file():
-            self._write_html("<h1>not found</h1>", status=404)
+            self._write_html("<h1>文件不存在</h1>", status=404)
             return
 
         mimetype, _ = mimetypes.guess_type(target.name)
@@ -2123,12 +2328,20 @@ class _Handler(BaseHTTPRequestHandler):
         if route == "/outputs":
             params = parse_qs(parsed.query, keep_blank_values=True)
             out_dir = (params.get("dir") or ["outputs"])[0]
-            self._write_html(_render_output_browser_page(out_dir, lab_mode=False))
+            q = (params.get("q") or [""])[0]
+            kind = (params.get("kind") or ["all"])[0]
+            self._write_html(
+                _render_output_browser_page(out_dir, lab_mode=False, query=q, kind=kind)
+            )
             return
         if route == "/lab/outputs" and LAB_ENABLED:
             params = parse_qs(parsed.query, keep_blank_values=True)
             out_dir = (params.get("dir") or ["outputs"])[0]
-            self._write_html(_render_output_browser_page(out_dir, lab_mode=True))
+            q = (params.get("q") or [""])[0]
+            kind = (params.get("kind") or ["all"])[0]
+            self._write_html(
+                _render_output_browser_page(out_dir, lab_mode=True, query=q, kind=kind)
+            )
             return
         self._write_html("<h1>未找到页面</h1>", status=404)
 
@@ -2515,9 +2728,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._write_html(body, status=400)
         except Exception as exc:
             # Unexpected pipeline error -- still 500 but keep UI alive.
+            detail = str(exc).strip()
+            friendly = "流水线异常：本次处理未完成，请检查输入后重试。"
+            if detail:
+                friendly += f"\n技术详情：{detail}"
             body = _render_page(
                 form=form,
-                error=f"流水线异常: {exc}",
+                error=friendly,
                 uploaded_files=uploaded_saved,
                 pool_selected=pool_selected_after,
                 lab_mode=is_lab_mode,
