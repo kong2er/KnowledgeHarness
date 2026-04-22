@@ -340,5 +340,5 @@ KnowledgeHarness/
 
 - 当前仓库已包含最新提交的 `.exe` 封包：`dist/KnowledgeHarness.exe`
 - 对应元信息：`dist/KnowledgeHarness.exe.buildinfo.json`
-- 封包时间：`2026-04-22 21:01:07 +08:00`
-- 封包 SHA256：`c87d3fef7ef560734b60b7af4cfdd01a811db0b9332fc7584a0d3753344e430d`
+- 封包时间：`2026-04-22 21:03:58 +08:00`
+- 封包 SHA256：`b01276328c72d95c948d27fff13f8f97c17cd6a4d5bd6353e3501145162fb695`
