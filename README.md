@@ -77,7 +77,7 @@ python3 service/flask_server.py --port 8001
 |------|---------|
 | 图片 OCR | `pip install -r requirements-ocr.txt` + 系统装 `tesseract-ocr`（或直接用 `Dockerfile`） |
 | API 协助（主题 / 分类 / 整理 / 图片OCR / web enrichment） | `cp .env.example .env` 并填入 `KNOWLEDGEHARNESS_API_URL`，详见 `docs/API_SETUP.md` |
-| 桌面可执行文件 | `pip install -r requirements-desktop.txt && python3 scripts/build_desktop.py` |
+| 桌面可执行文件 | `pip install -r requirements-desktop.txt && python3 scripts/build_desktop.py`（按当前系统产物：Linux/macOS 生成无后缀可执行文件，Windows 生成 `.exe`） |
 | Docker（OCR-ready） | `docker build -t knowledgeharness . && docker run --rm -v "$PWD/samples:/data" knowledgeharness python app.py /data/demo.md --output-dir /data/out` |
 
 ## 治理文档索引
